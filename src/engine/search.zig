@@ -28,7 +28,7 @@ pub fn init_lmr() void {
     }
 }
 
-pub const MAX_PLY = 128;
+pub const MAX_PLY = 200;
 pub const MAX_GAMEPLY = 1024;
 
 // Tablebase win/loss score band, kept just below the mate band
@@ -40,6 +40,15 @@ pub const TB_WIN_SCORE: i32 = hce.MateScore - hce.MaxMate - MAX_PLY;
 // Threshold for ply-normalizing scores stored in the TT. Covers both mate
 // scores (above MateScore - MaxMate) and TB win/loss scores (above TB_WIN_SCORE - MAX_PLY).
 const SCORE_PLY_ADJ: i32 = TB_WIN_SCORE - MAX_PLY;
+
+comptime {
+    if (hce.MaxMate < 2 * @as(i32, MAX_PLY)) {
+        @compileError("hce.MaxMate must be >= 2 * MAX_PLY: TT mate-score normalization adds ply on store and subtracts ply on probe, so a round-tripped mate loses up to two plies of magnitude and the mate band must cover twice the maximum ply");
+    }
+    if (MAX_PLY > 256) {
+        @compileError("MAX_PLY must be <= 256: position.Position.history has exactly 256 entries of slack above MAX_HISTORY_PLY (src/chess/position.zig:9,62) for search play_move calls, and position.zig cannot import search.zig to enforce this locally");
+    }
+}
 
 pub const NodeType = enum {
     Root,
@@ -61,6 +70,13 @@ pub const STABILITY_MULTIPLIER = [5]f32{ 2.50, 1.20, 0.90, 0.80, 0.75 };
 
 pub var helper_searchers: std.array_list.Managed(Searcher) = std.array_list.Managed(Searcher).init(std.heap.c_allocator);
 pub var threads: std.array_list.Managed(?std.Thread) = std.array_list.Managed(?std.Thread).init(std.heap.c_allocator);
+
+pub fn reset_helper_heuristics() void {
+    for (helper_searchers.items) |*helper| {
+        helper.age_pending = false;
+        helper.reset_heuristics(true);
+    }
+}
 
 pub const Searcher = struct {
     min_depth: usize = 1,
@@ -107,6 +123,7 @@ pub const Searcher = struct {
     ttable: *tt.TranspositionTable = &tt.GlobalTT,
     thread_id: usize = 0,
     silent_output: bool = false,
+    age_pending: bool = false,
 
     node_spent_table: [64][64]u64 = undefined,
 
@@ -137,6 +154,10 @@ pub const Searcher = struct {
         std.heap.c_allocator.destroy(self.root_board);
     }
 
+    inline fn pack_static_eval(value: i32) i16 {
+        return @as(i16, @intCast(@min(@as(i32, 32767), @max(@as(i32, tt.EVAL_NONE) + 1, value))));
+    }
+
     inline fn qsearch_store(self: *Searcher, pos: *position.Position, score: i32, static_eval_val: i32, move: types.Move, flag: tt.Bound) void {
         if (self.tt_store_is_ambiguous(score, flag)) return;
 
@@ -148,7 +169,7 @@ pub const Searcher = struct {
         }
         self.ttable.set(pos.hash, tt.Item{
             .eval = stored,
-            .static_eval = @as(i16, @intCast(@min(@as(i32, 32767), @max(@as(i32, -32768), static_eval_val)))),
+            .static_eval = pack_static_eval(static_eval_val),
             .bestmove = move,
             .flag = flag,
             .depth = 0,
@@ -382,11 +403,12 @@ pub const Searcher = struct {
         var stability: usize = 0;
 
         const extra = if (NUM_THREADS > helper_searchers.items.len) NUM_THREADS - helper_searchers.items.len else 0;
+        const existing_helpers = NUM_THREADS - extra;
         helper_searchers.ensureTotalCapacity(NUM_THREADS) catch unreachable;
         helper_searchers.appendNTimesAssumeCapacity(undefined, extra);
         threads.ensureTotalCapacity(NUM_THREADS) catch unreachable;
         threads.appendNTimesAssumeCapacity(null, extra);
-        var ti: usize = NUM_THREADS - extra;
+        var ti: usize = existing_helpers;
         while (ti < NUM_THREADS) : (ti += 1) {
             helper_searchers.items[ti] = Searcher.new();
         }
@@ -394,6 +416,8 @@ pub const Searcher = struct {
         ti = 0;
         while (ti < NUM_THREADS) : (ti += 1) {
             helper_searchers.items[ti].nodes = 0;
+            helper_searchers.items[ti].tbhits = 0;
+            helper_searchers.items[ti].age_pending = ti < existing_helpers;
         }
 
         var tdepth: usize = 1;
@@ -470,14 +494,8 @@ pub const Searcher = struct {
             var total_tbhits: u64 = self.tbhits;
 
             if (depth > 1) {
-                outW.print("info string thread 0 nodes {}\n", .{
-                    self.nodes,
-                }) catch {};
                 var thread_index: usize = 0;
                 while (thread_index < NUM_THREADS) : (thread_index += 1) {
-                    outW.print("info string thread {} nodes {}\n", .{
-                        thread_index + 1, helper_searchers.items[thread_index].nodes,
-                    }) catch {};
                     total_nodes_all += helper_searchers.items[thread_index].nodes;
                     total_tbhits += helper_searchers.items[thread_index].tbhits;
                 }
@@ -692,6 +710,10 @@ pub const Searcher = struct {
             helper_searchers.items[i].parent_stop = &self.stop;
             helper_searchers.items[i].parent_nodes = if (self.max_nodes != null or self.soft_max_nodes != null) &self.shared_nodes else null;
             helper_searchers.items[i].root_history_len = self.root_history_len;
+            helper_searchers.items[i].syzygy_root_active = self.syzygy_root_active;
+            if (self.syzygy_root_active) {
+                helper_searchers.items[i].syzygy_root = self.syzygy_root;
+            }
             helper_searchers.items[i].root_board.* = pos.*;
             helper_searchers.items[i].hash_history.clearRetainingCapacity();
             helper_searchers.items[i].hash_history.appendSlice(self.hash_history.items) catch {};
@@ -709,6 +731,10 @@ pub const Searcher = struct {
 
     pub fn start_helper(self: *Searcher, color: types.Color, depth_: usize, alpha_: i32, beta_: i32) void {
         @atomicStore(bool, &self.is_searching, true, .release);
+        if (self.age_pending) {
+            self.age_pending = false;
+            self.reset_heuristics(false);
+        }
         self.time_stop = false;
         self.best_move = types.Move.empty();
         self.timer = types.Timer.start();
@@ -763,12 +789,12 @@ pub const Searcher = struct {
         const is_root = node == NodeType.Root;
         const on_pv: bool = node != NodeType.NonPV;
 
+        const in_check = pos.in_check(color);
+
         // Step 1.3: Ply Overflow Check
         if (self.ply == MAX_PLY) {
-            return hce.evaluate_comptime(pos, color);
+            return if (in_check) self.contempt_score() else hce.evaluate_comptime(pos, color);
         }
-
-        const in_check = pos.in_check(color);
 
         // Step 4.1: Check Extension (moved up)
         if (in_check) {
@@ -830,21 +856,12 @@ pub const Searcher = struct {
             }
 
             if (!is_null and !on_pv and !is_root and entry.?.depth >= depth) {
-                if (pos.history[pos.game_ply].fifty < 90 and (depth == 0 or !on_pv)) {
+                if (pos.history[pos.game_ply].fifty < 90) {
                     switch (entry.?.flag) {
-                        .Exact => {
-                            return tt_eval;
-                        },
-                        .Lower => {
-                            alpha = @max(alpha, tt_eval);
-                        },
-                        .Upper => {
-                            beta = @min(beta, tt_eval);
-                        },
+                        .Exact => return tt_eval,
+                        .Lower => if (tt_eval >= beta) return tt_eval,
+                        .Upper => if (tt_eval <= alpha) return tt_eval,
                         else => {},
-                    }
-                    if (alpha >= beta) {
-                        return tt_eval;
                     }
                 }
             }
@@ -882,7 +899,7 @@ pub const Searcher = struct {
                     }
                     self.ttable.set(pos.hash, tt.Item{
                         .eval = stored_tb,
-                        .static_eval = 0,
+                        .static_eval = tt.EVAL_NONE,
                         .bestmove = types.Move.empty(),
                         .flag = tb_flag,
                         .depth = @as(u8, @intCast(depth)),
@@ -902,11 +919,9 @@ pub const Searcher = struct {
             }
         }
 
-        const static_eval: i32 = if (in_check) -hce.MateScore + @as(i32, @intCast(self.ply)) else if (tthit) entry.?.static_eval else if (is_null) -self.eval_history[self.ply - 1] else if (self.exclude_move[self.ply].to_u16() != 0) self.eval_history[self.ply] else hce.evaluate_comptime(pos, color);
+        const static_eval: i32 = if (in_check) -hce.MateScore + @as(i32, @intCast(self.ply)) else if (tthit and entry.?.static_eval != tt.EVAL_NONE) entry.?.static_eval else if (is_null) -self.eval_history[self.ply - 1] else if (self.exclude_move[self.ply].to_u16() != 0) self.eval_history[self.ply] else hce.evaluate_comptime(pos, color);
 
         var best_score: i32 = static_eval;
-
-        var low_estimate: i32 = -hce.MateScore - 1;
 
         self.eval_history[self.ply] = static_eval;
 
@@ -914,8 +929,8 @@ pub const Searcher = struct {
 
         const has_non_pawns = pos.has_non_pawns_color(color);
 
-        var last_move = if (self.ply > 0) self.move_history[self.ply - 1] else types.Move.empty();
-        var last_last_last_move = if (self.ply > 2) self.move_history[self.ply - 3] else types.Move.empty();
+        const last_move = if (self.ply > 0) self.move_history[self.ply - 1] else types.Move.empty();
+        const last_last_last_move = if (self.ply > 2) self.move_history[self.ply - 3] else types.Move.empty();
 
         // >> Step 3: Extensions/Reductions
         // Step 3.1: IIR
@@ -926,8 +941,6 @@ pub const Searcher = struct {
 
         // >> Step 4: Prunings
         if (!in_check and !on_pv and self.exclude_move[self.ply].to_u16() == 0) {
-            low_estimate = if (!tthit or entry.?.flag == tt.Bound.Lower) static_eval else tt_eval;
-
             // Step 4.1: Reverse Futility Pruning
             if (@as(i32, @intCast(@abs(beta))) < hce.MateScore - hce.MaxMate and depth <= parameters.RFPDepth) {
                 var n = @as(i32, @intCast(depth)) * parameters.RFPMultiplier;
@@ -950,6 +963,8 @@ pub const Searcher = struct {
                 r += @as(usize, @intCast(@max(@as(i32, 0), @min(parameters.NMPBetaMax, @divTrunc((static_eval - beta), parameters.NMPBetaDivisor)))));
                 r = @min(r, depth);
 
+                self.move_history[self.ply] = types.Move.empty();
+                self.moved_piece_history[self.ply] = types.Piece.NO_PIECE;
                 self.ply += 1;
                 pos.play_null_move();
                 var null_score = -self.negamax(pos, opp_color, depth - r, -beta, -beta + 1, true, NodeType.NonPV, !cutnode);
@@ -961,7 +976,7 @@ pub const Searcher = struct {
                 }
 
                 if (null_score >= beta) {
-                    if (null_score >= hce.MateScore - hce.MaxMate) {
+                    if (null_score >= SCORE_PLY_ADJ) {
                         null_score = beta;
                     }
 
@@ -1001,7 +1016,7 @@ pub const Searcher = struct {
 
                 // Skip if TT already refutes at sufficient depth
                 if (!(tthit and entry.?.depth >= depth -| parameters.ProbCutTTDepthMargin and
-                    self.tt_score(entry.?.eval, entry.?.flag) < probcut_beta))
+                    tt_eval < probcut_beta))
                 {
                     // Generate captures only
                     var pc_bytes: [256 * @sizeOf(types.Move)]u8 = undefined;
@@ -1049,7 +1064,7 @@ pub const Searcher = struct {
                                 }
                                 self.ttable.set(pos.hash, tt.Item{
                                     .eval = stored,
-                                    .static_eval = @as(i16, @intCast(@min(@as(i32, 32767), @max(@as(i32, -32768), static_eval)))),
+                                    .static_eval = pack_static_eval(static_eval),
                                     .bestmove = move,
                                     .flag = tt.Bound.Lower,
                                     .depth = @as(u8, @intCast(depth - parameters.ProbCutReduction + 1)),
@@ -1122,7 +1137,6 @@ pub const Searcher = struct {
             const is_killer = move.to_u16() == self.killer[self.ply][0].to_u16() or move.to_u16() == self.killer[self.ply][1].to_u16();
 
             if (!is_capture) {
-                quiet_moves.append(move) catch unreachable;
                 quiet_count += 1;
             }
 
@@ -1184,7 +1198,7 @@ pub const Searcher = struct {
                 and depth >= parameters.SEDepth
                 and tthit
                 and entry.?.flag != tt.Bound.Upper
-                and !hce.is_near_mate(entry.?.eval)
+                and @as(i32, @intCast(@abs(tt_eval))) < SCORE_PLY_ADJ
                 and hashmove.to_u16() == move.to_u16()
                 and entry.?.depth >= depth -| parameters.SETTDepthMargin
             ) {
@@ -1233,11 +1247,11 @@ pub const Searcher = struct {
             var score: i32 = 0;
             const min_lmr_move: usize = if (on_pv) parameters.LMRMinMovePV else parameters.LMRMinMoveNonPV;
             const is_winning_capture = is_capture and evallist.items[index] >= movepick.SortWinningCapture - 200;
-            var do_full_search = false;
             if (on_pv and legals == 1) {
                 score = -self.negamax(pos, opp_color, new_depth, -beta, -alpha, false, NodeType.PV, false);
             } else {
-                if (!in_check and depth >= parameters.LMRDepth and index >= min_lmr_move and (!is_capture or !is_winning_capture)) {
+                var do_full_search = true;
+                if (!in_check and depth >= parameters.LMRDepth and index >= min_lmr_move and !is_winning_capture) {
                     // Step 5.6: Late-Move Reduction
                     var reduction: i32 = QuietLMR[@min(depth, 63)][@min(index, 63)];
 
@@ -1276,15 +1290,13 @@ pub const Searcher = struct {
                     score = -self.negamax(pos, opp_color, rd, -alpha - 1, -alpha, false, NodeType.NonPV, true);
 
                     do_full_search = score > alpha and rd < new_depth;
-                } else {
-                    do_full_search = !on_pv or index > 0;
                 }
 
                 if (do_full_search) {
                     score = -self.negamax(pos, opp_color, new_depth, -alpha - 1, -alpha, false, NodeType.NonPV, !cutnode);
                 }
 
-                if (on_pv and ((score > alpha and score < beta) or index == 0)) {
+                if (on_pv and score > alpha and score < beta) {
                     score = -self.negamax(pos, opp_color, new_depth, -beta, -alpha, false, NodeType.PV, false);
                 }
             }
@@ -1292,6 +1304,10 @@ pub const Searcher = struct {
             self.ply -= 1;
             pos.undo_move(color, move);
             _ = self.hash_history.pop();
+
+            if (!is_capture) {
+                quiet_moves.append(move) catch unreachable;
+            }
 
             if (is_root and self.thread_id == 0) {
                 self.node_spent_table[move.from][move.to] += self.nodes - nodes_before;
@@ -1399,7 +1415,7 @@ pub const Searcher = struct {
 
             self.ttable.set(pos.hash, tt.Item{
                 .eval = stored_eval,
-                .static_eval = @as(i16, @intCast(@min(@as(i32, 32767), @max(@as(i32, -32768), static_eval)))),
+                .static_eval = pack_static_eval(static_eval),
                 .bestmove = best_move,
                 .flag = tt_flag,
                 .depth = @as(u8, @intCast(depth)),
@@ -1427,12 +1443,12 @@ pub const Searcher = struct {
 
         self.pv_size[self.ply] = 0;
 
+        const in_check = pos.in_check(color);
+
         // Step 1.4: Ply Overflow Check
         if (self.ply == MAX_PLY) {
-            return hce.evaluate_comptime(pos, color);
+            return if (in_check) self.contempt_score() else hce.evaluate_comptime(pos, color);
         }
-
-        const in_check = pos.in_check(color);
 
         if (self.draw_score(pos, color, in_check, true)) |draw| {
             return draw;
@@ -1579,7 +1595,7 @@ pub const Searcher = struct {
         }
 
         if (best_move.to_u16() != 0) {
-            self.qsearch_store(pos, best_score, static_eval, best_move, tt.Bound.Exact);
+            self.qsearch_store(pos, best_score, static_eval, best_move, tt.Bound.Upper);
         }
 
         return best_score;

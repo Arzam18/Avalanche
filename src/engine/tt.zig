@@ -7,8 +7,7 @@ const hce = @import("hce.zig");
 
 pub const MB: usize = 1 << 20;
 pub const KB: usize = 1 << 10;
-
-pub var LOCK_GLOBAL_TT = false;
+pub const MAX_HASH_MB: usize = 1048576;
 
 pub const Bound = enum(u2) {
     None,
@@ -16,6 +15,8 @@ pub const Bound = enum(u2) {
     Lower, // Cut Nodes
     Upper, // All Nodes
 };
+
+pub const EVAL_NONE: i16 = -32768;
 
 pub const Item = packed struct {
     key: u32, // verification = @truncate(hash)
