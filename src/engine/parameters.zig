@@ -24,10 +24,11 @@ pub const TunableParams = [_]Tunable{
     .{ .name = "TmStabilityMultiplier", .value = 3, .min_value = 1, .max_value = 8, .c_end = 0.5, .worth_tuning = false },
     .{ .name = "TmStabilityMin", .value = 50, .min_value = 30, .max_value = 70, .c_end = 2, .worth_tuning = true },
     .{ .name = "TmScoreJumpMultiplier", .value = 110, .min_value = 100, .max_value = 150, .c_end = 2.5, .worth_tuning = true },
+    .{ .name = "TmScoreJumpThreshold", .value = 14, .min_value = 5, .max_value = 40, .c_end = 1.75, .r_end = 0.002, .worth_tuning = true },
     .{ .name = "NodeTmDepth", .value = 4, .min_value = 2, .max_value = 8, .c_end = 0.5, .worth_tuning = false },
     .{ .name = "NodeTmBase", .value = 144, .min_value = 100, .max_value = 250, .c_end = 8, .worth_tuning = true },
     .{ .name = "NodeTmMultiplier", .value = 174, .min_value = 80, .max_value = 260, .c_end = 10, .worth_tuning = true },
-    .{ .name = "NodeTmMin", .value = 50, .min_value = 20, .max_value = 90, .c_end = 3.5, .worth_tuning = true },
+    .{ .name = "NodeTmMin", .value = 50, .min_value = 20, .max_value = 90, .c_end = 3.5, .worth_tuning = false },
     .{ .name = "NodeTmMax", .value = 200, .min_value = 110, .max_value = 350, .c_end = 12, .worth_tuning = true },
 
     // -- Reverse futility pruning --
@@ -140,6 +141,7 @@ pub var TmStabilityBase: i32 = intDefault("TmStabilityBase");
 pub var TmStabilityMultiplier: i32 = intDefault("TmStabilityMultiplier");
 pub var TmStabilityMin: i32 = intDefault("TmStabilityMin");
 pub var TmScoreJumpMultiplier: i32 = intDefault("TmScoreJumpMultiplier");
+pub var TmScoreJumpThreshold: i32 = intDefault("TmScoreJumpThreshold");
 pub var NodeTmDepth: usize = intDefault("NodeTmDepth");
 pub var NodeTmBase: i32 = intDefault("NodeTmBase");
 pub var NodeTmMultiplier: i32 = intDefault("NodeTmMultiplier");

@@ -66,8 +66,6 @@ pub var MOVE_OVERHEAD: u64 = DEFAULT_MOVE_OVERHEAD;
 pub var CONTEMPT: i32 = 0;
 pub const MAX_CONTEMPT: i32 = 100;
 
-pub const STABILITY_MULTIPLIER = [5]f32{ 2.50, 1.20, 0.90, 0.80, 0.75 };
-
 pub var helper_searchers: std.array_list.Managed(Searcher) = std.array_list.Managed(Searcher).init(std.heap.c_allocator);
 pub var threads: std.array_list.Managed(?std.Thread) = std.array_list.Managed(?std.Thread).init(std.heap.c_allocator);
 
@@ -561,7 +559,7 @@ pub const Searcher = struct {
                     (@as(f32, @floatFromInt(parameters.TmStabilityMultiplier)) / 100.0) * @as(f32, @floatFromInt(stability)),
             );
 
-            if (score - prev_score > parameters.AspirationWindow) {
+            if (score - prev_score > parameters.TmScoreJumpThreshold) {
                 factor *= @as(f32, @floatFromInt(parameters.TmScoreJumpMultiplier)) / 100.0;
             }
 

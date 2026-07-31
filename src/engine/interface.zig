@@ -461,7 +461,7 @@ pub const UciInterface = struct {
                         }
 
                         if (mytime.? <= overhead) {
-                            const budget = @max(@as(u64, 1), mytime.?);
+                            const budget = @max(@as(u64, 1), mytime.? / 2);
                             self.searcher.ideal_time = budget;
                             movetime = budget;
                         } else {
