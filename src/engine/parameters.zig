@@ -39,7 +39,7 @@ pub const TunableParams = [_]Tunable{
     // -- Null move pruning --
     .{ .name = "NMPDepth", .value = 3, .min_value = 2, .max_value = 6, .c_end = 0.5, .worth_tuning = false },
     .{ .name = "NMPBase", .value = 4, .min_value = 2, .max_value = 6, .c_end = 0.5, .worth_tuning = false },
-    .{ .name = "NMPDepthFactor", .value = 75, .min_value = 32, .max_value = 128, .c_end = 5, .worth_tuning = true },
+    .{ .name = "NMPDepthFactor", .value = 73, .min_value = 32, .max_value = 128, .c_end = 5, .worth_tuning = true },
     .{ .name = "NMPImprovingMargin", .value = 94, .min_value = 20, .max_value = 160, .c_end = 7, .worth_tuning = true },
     .{ .name = "NMPBetaDivisor", .value = 182, .min_value = 90, .max_value = 320, .c_end = 11, .worth_tuning = true },
     .{ .name = "NMPBetaMax", .value = 4, .min_value = 2, .max_value = 8, .c_end = 0.5, .worth_tuning = false },
@@ -84,15 +84,15 @@ pub const TunableParams = [_]Tunable{
     // -- Singular extensions --
     .{ .name = "SEDepth", .value = 7, .min_value = 5, .max_value = 10, .c_end = 0.5, .worth_tuning = false },
     .{ .name = "SETTDepthMargin", .value = 3, .min_value = 1, .max_value = 5, .c_end = 0.5, .worth_tuning = false },
-    .{ .name = "SEBetaMultiplier", .value = 99, .min_value = 30, .max_value = 220, .c_end = 9.5, .worth_tuning = true },
-    .{ .name = "SEDoubleMargin", .value = 28, .min_value = 10, .max_value = 90, .c_end = 4, .worth_tuning = true },
-    .{ .name = "SETripleMargin", .value = 96, .min_value = 30, .max_value = 200, .c_end = 8, .worth_tuning = true },
+    .{ .name = "SEBetaMultiplier", .value = 89, .min_value = 30, .max_value = 220, .c_end = 9.5, .worth_tuning = true },
+    .{ .name = "SEDoubleMargin", .value = 31, .min_value = 10, .max_value = 90, .c_end = 4, .worth_tuning = true },
+    .{ .name = "SETripleMargin", .value = 91, .min_value = 30, .max_value = 200, .c_end = 8, .worth_tuning = true },
     .{ .name = "SEFailHighReduction", .value = 2, .min_value = 0, .max_value = 4, .c_end = 0.5, .worth_tuning = false },
     .{ .name = "SECutnodeReduction", .value = 1, .min_value = 0, .max_value = 3, .c_end = 0.5, .worth_tuning = false },
 
     // -- Late move reductions --
-    .{ .name = "LMRWeight", .value = 502, .min_value = 250, .max_value = 700, .c_end = 22, .worth_tuning = true, .reinit_lmr = true },
-    .{ .name = "LMRBias", .value = 665, .min_value = 300, .max_value = 900, .c_end = 30, .worth_tuning = true, .reinit_lmr = true },
+    .{ .name = "LMRWeight", .value = 462, .min_value = 250, .max_value = 700, .c_end = 22, .worth_tuning = true, .reinit_lmr = true },
+    .{ .name = "LMRBias", .value = 646, .min_value = 300, .max_value = 900, .c_end = 30, .worth_tuning = true, .reinit_lmr = true },
     .{ .name = "LMRDepth", .value = 3, .min_value = 2, .max_value = 5, .c_end = 0.5, .worth_tuning = false },
     .{ .name = "LMRMinMovePV", .value = 5, .min_value = 2, .max_value = 8, .c_end = 0.5, .worth_tuning = false },
     .{ .name = "LMRMinMoveNonPV", .value = 3, .min_value = 1, .max_value = 6, .c_end = 0.5, .worth_tuning = false },
@@ -101,7 +101,7 @@ pub const TunableParams = [_]Tunable{
     .{ .name = "LMRNonPV", .value = 1, .min_value = 0, .max_value = 2, .c_end = 0.5, .worth_tuning = false },
     .{ .name = "LMRTTDepth", .value = 1, .min_value = 0, .max_value = 2, .c_end = 0.5, .worth_tuning = false },
     .{ .name = "LMRCheck", .value = 1, .min_value = 0, .max_value = 2, .c_end = 0.5, .worth_tuning = false },
-    .{ .name = "LMRHistoryDivisor", .value = 5071, .min_value = 3072, .max_value = 12288, .c_end = 460, .worth_tuning = true },
+    .{ .name = "LMRHistoryDivisor", .value = 5164, .min_value = 3072, .max_value = 12288, .c_end = 460, .worth_tuning = true },
 
     // -- History updates --
     .{ .name = "HistoryBonusMultiplier", .value = 404, .min_value = 160, .max_value = 700, .c_end = 27, .worth_tuning = true },
