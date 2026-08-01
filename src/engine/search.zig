@@ -384,12 +384,14 @@ pub const Searcher = struct {
                             wdl_model.Prediction{ .win = 0, .draw = 1000, .loss = 0 };
                         outW.print(" wdl {} {} {}", .{ p.win, p.draw, p.loss }) catch {};
                     }
-                    outW.writeAll("\nbestmove 0000\n") catch {};
-                    outW.flush() catch {};
                 }
                 self.best_move = types.Move.empty();
                 self.ttable.do_age();
                 @atomicStore(bool, &self.is_searching, false, .release);
+                if (!self.silent_output) {
+                    outW.writeAll("\nbestmove 0000\n") catch {};
+                    outW.flush() catch {};
+                }
                 return terminal;
             }
         }
@@ -599,6 +601,9 @@ pub const Searcher = struct {
 
         self.best_move = bm;
 
+        self.ttable.do_age();
+        @atomicStore(bool, &self.is_searching, false, .release);
+
         if (!self.silent_output) {
             outW.writeAll("bestmove ") catch {};
             if (bm.to_u16() == 0) {
@@ -609,9 +614,6 @@ pub const Searcher = struct {
             outW.writeByte('\n') catch {};
             outW.flush() catch {};
         }
-
-        self.ttable.do_age();
-        @atomicStore(bool, &self.is_searching, false, .release);
 
         return score;
     }

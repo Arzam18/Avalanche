@@ -95,6 +95,8 @@ pub const UciInterface = struct {
                 continue;
             }
 
+            self.join_search();
+
             if (std.mem.eql(u8, token.?, "genfens")) {
                 // OpenBench datagen: tokenize the rest of the line and generate FENs
                 var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
