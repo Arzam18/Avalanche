@@ -211,14 +211,14 @@ static void *map_file(FD fd, map_t *mapping)
   void *data = mmap(NULL, statbuf.st_size, PROT_READ,
 			      MAP_SHARED, fd, 0);
 
-  #if defined(MADV_RANDOM)
-  madvise(data, statbuf.st_size, MADV_RANDOM);
-  #endif
-
   if (data == MAP_FAILED) {
     perror("mmap");
     return NULL;
   }
+
+  #if defined(MADV_RANDOM)
+  madvise(data, statbuf.st_size, MADV_RANDOM);
+  #endif
 #else
   DWORD size_low, size_high;
   size_low = GetFileSize(fd, &size_high);
@@ -522,7 +522,8 @@ static void *map_tb(const char *name, const char *suffix, map_t *mapping) {
     void *data = map_file(fd, mapping);
     if (data == NULL) {
         fprintf(stderr, "Could not map %s%s into memory.\n", name, suffix);
-        exit(EXIT_FAILURE);
+        close_tb(fd);
+        return NULL;
     }
 
     close_tb(fd);

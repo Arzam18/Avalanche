@@ -74,28 +74,73 @@ fn memsetWorker(slice: []i128) void {
     @memset(slice, 0);
 }
 
-fn adviseHugePages(ptr: [*]u8, len: usize) void {
-    if (builtin.os.tag == .linux) {
-        const MADV_HUGEPAGE = 14;
-        const addr = @intFromPtr(ptr);
-        if (addr & 4095 == 0) {
-            const aligned_ptr: [*]align(4096) u8 = @ptrFromInt(addr);
-            std.posix.madvise(aligned_ptr, len, MADV_HUGEPAGE) catch {};
+fn memsetThreadCount() usize {
+    if (search.THREADS_CONFIGURED) return search.NUM_THREADS + 1;
+    return std.Thread.getCpuCount() catch 1;
+}
+
+pub const TT_ALIGN: usize = if (builtin.os.tag == .linux) 2 * MB else std.atomic.cache_line;
+
+// `&.{}` would carry @alignOf(i128), contradicting the declared alignment.
+var empty_table: [0]i128 align(TT_ALIGN) = .{};
+
+fn adviseHugePages(data: []align(TT_ALIGN) i128) bool {
+    if (builtin.os.tag != .linux) return false;
+    const MADV_HUGEPAGE = 14;
+    const ptr: [*]align(TT_ALIGN) u8 = @ptrCast(data.ptr);
+    std.posix.madvise(ptr, data.len * @sizeOf(i128), MADV_HUGEPAGE) catch return false;
+    return true;
+}
+
+fn hugePageBytes(addr: usize) u64 {
+    if (builtin.os.tag != .linux) return 0;
+    const file = std.Io.Dir.cwd().openFile(types.GLOBAL_IO, "/proc/self/smaps", .{}) catch return 0;
+    defer file.close(types.GLOBAL_IO);
+
+    var buf: [1 << 15]u8 = undefined;
+    var stream = file.readerStreaming(types.GLOBAL_IO, &buf);
+    const reader = &stream.interface;
+    var in_range = false;
+    while (reader.takeDelimiterInclusive('\n') catch null) |line| {
+        if (std.mem.indexOfScalar(u8, line, '-')) |dash| {
+            if (std.mem.indexOfScalar(u8, line, ' ')) |space| {
+                if (dash < space) {
+                    const start = std.fmt.parseInt(usize, line[0..dash], 16) catch continue;
+                    const end = std.fmt.parseInt(usize, line[dash + 1 .. space], 16) catch continue;
+                    in_range = addr >= start and addr < end;
+                    continue;
+                }
+            }
+        }
+        if (in_range and std.mem.startsWith(u8, line, "AnonHugePages:")) {
+            var it = std.mem.tokenizeAny(u8, line["AnonHugePages:".len..], " \tkB\r\n");
+            const kb = it.next() orelse return 0;
+            return (std.fmt.parseInt(u64, kb, 10) catch 0) * KB;
         }
     }
+    return 0;
 }
 
 pub const TranspositionTable = struct {
-    data: std.array_list.Managed(i128),
+    data: []align(TT_ALIGN) i128,
     size: usize,
     age: u5,
+    huge_page_bytes: u64 = 0,
 
     pub fn new() TranspositionTable {
         return TranspositionTable{
-            .data = std.array_list.Managed(i128).init(tt_allocator),
+            .data = &empty_table,
             .size = 0,
             .age = 0,
         };
+    }
+
+    pub fn deinit(self: *TranspositionTable) void {
+        if (self.data.len != 0) {
+            tt_allocator.free(self.data);
+        }
+        self.data = &empty_table;
+        self.size = 0;
     }
 
     pub fn reset(self: *TranspositionTable, mb: u64) void {
@@ -105,33 +150,22 @@ pub const TranspositionTable = struct {
         }
         const requested_size = @max(@as(usize, 1), bytes / @sizeOf(Item));
 
-        var new_data = std.array_list.Managed(i128).init(tt_allocator);
-        new_data.ensureTotalCapacityPrecise(requested_size) catch {
-            new_data.deinit();
-            return;
-        };
-        new_data.expandToCapacity();
-        if (new_data.items.len == 0) {
-            new_data.deinit();
-            return;
-        }
+        const new_data = tt_allocator.alignedAlloc(i128, .fromByteUnits(TT_ALIGN), requested_size) catch return;
+        _ = adviseHugePages(new_data);
 
-        const new_size = new_data.items.len;
-        const byte_len = new_size * @sizeOf(i128);
-        adviseHugePages(@as([*]u8, @ptrCast(new_data.items.ptr)), byte_len);
+        const num_threads = memsetThreadCount();
+        parallelMemset(new_data, num_threads);
 
-        const num_threads = search.NUM_THREADS + 1;
-        parallelMemset(new_data.items, num_threads);
-
-        self.data.deinit();
+        self.deinit();
         self.data = new_data;
-        self.size = new_size;
+        self.size = new_data.len;
+        self.huge_page_bytes = hugePageBytes(@intFromPtr(new_data.ptr));
     }
 
     pub inline fn clear(self: *TranspositionTable) void {
         if (self.size == 0) return;
-        const num_threads = search.NUM_THREADS + 1;
-        parallelMemset(self.data.items, num_threads);
+        const num_threads = memsetThreadCount();
+        parallelMemset(self.data, num_threads);
     }
 
     pub inline fn do_age(self: *TranspositionTable) void {
@@ -167,7 +201,7 @@ pub const TranspositionTable = struct {
     pub inline fn set(self: *TranspositionTable, hash: u64, entry: Item) void {
         if (self.size == 0) return;
         const idx = self.index(hash);
-        const p = &self.data.items[idx];
+        const p = &self.data[idx];
 
         // Slot lock in the high bit of word1; remaining padding bits are a sequence.
         const w1_ptr = @as(*i64, @ptrFromInt(@intFromPtr(p) + 8));
@@ -185,7 +219,7 @@ pub const TranspositionTable = struct {
         // 3. Previous entry is from older search
         // 4. It is a different position
         // 5. Previous entry has lower depth (with +4 margin)
-        if ((old_w0 == 0 and old_w1 == 0) or entry.flag == Bound.Exact or p_val.age != self.age or p_val.key != entry.key or p_val.depth <= entry.depth + 4) {
+        if ((old_w0 == 0 and old_w1 == 0) or entry.flag == Bound.Exact or p_val.age != self.age or p_val.key != entry.key or @as(u16, p_val.depth) <= @as(u16, entry.depth) + 4) {
             var stored_entry = entry;
             stored_entry._padding = (p_val._padding +% 1) & 0x7fff;
             const entry_as_i128: i128 = @as(i128, @bitCast(stored_entry));
@@ -199,9 +233,9 @@ pub const TranspositionTable = struct {
 
     pub inline fn prefetch(self: *TranspositionTable, hash: u64) void {
         if (self.size == 0) return;
-        @prefetch(&self.data.items[self.index(hash)], .{
+        @prefetch(&self.data[self.index(hash)], .{
             .rw = .read,
-            .locality = 1,
+            .locality = 3,
             .cache = .data,
         });
     }
@@ -212,7 +246,7 @@ pub const TranspositionTable = struct {
         var count: u64 = 0;
         var i: usize = 0;
         while (i < sample) : (i += 1) {
-            const p = &self.data.items[i];
+            const p = &self.data[i];
             if (loadSnapshot(p)) |snapshot| {
                 const entry = snapshot.item;
                 if (entry.flag != .None and entry.age == self.age) {
@@ -225,7 +259,7 @@ pub const TranspositionTable = struct {
 
     pub inline fn get(self: *TranspositionTable, hash: u64) ?Item {
         if (self.size == 0) return null;
-        const p = &self.data.items[self.index(hash)];
+        const p = &self.data[self.index(hash)];
         const snapshot = loadSnapshot(p) orelse return null;
         const entry = snapshot.item;
 

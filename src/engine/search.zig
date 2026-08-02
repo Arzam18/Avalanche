@@ -10,6 +10,7 @@ const movepick = @import("movepick.zig");
 const see = @import("see.zig");
 const syzygy = @import("syzygy.zig");
 const wdl_model = @import("wdl.zig");
+const nnue = @import("nnue.zig");
 
 const parameters = @import("parameters.zig");
 
@@ -92,6 +93,9 @@ comptime {
     if (hce.MaxMate < 2 * @as(i32, MAX_PLY)) {
         @compileError("hce.MaxMate must be >= 2 * MAX_PLY: TT mate-score normalization adds ply on store and subtracts ply on probe, so a round-tripped mate loses up to two plies of magnitude and the mate band must cover twice the maximum ply");
     }
+    if (MAX_PLY + 2 > nnue.STACK_CAP) {
+        @compileError("nnue.STACK_CAP must exceed MAX_PLY: a search that rebased the accumulator stack would pop into the wrong frame");
+    }
     if (MAX_PLY > 256) {
         @compileError("MAX_PLY must be <= 256: position.Position.history has exactly 256 entries of slack above MAX_HISTORY_PLY (src/chess/position.zig:9,62) for search play_move calls, and position.zig cannot import search.zig to enforce this locally");
     }
@@ -105,6 +109,7 @@ pub const NodeType = enum {
 
 pub const MAX_THREADS = 512;
 pub var NUM_THREADS: usize = 0;
+pub var THREADS_CONFIGURED: bool = false;
 
 pub const DEFAULT_MOVE_OVERHEAD: u64 = 25;
 pub const MAX_MOVE_OVERHEAD: u64 = 5000;
@@ -115,12 +120,76 @@ pub const MAX_CONTEMPT: i32 = 100;
 
 pub var helper_searchers: std.array_list.Managed(Searcher) = std.array_list.Managed(Searcher).init(std.heap.c_allocator);
 pub var threads: std.array_list.Managed(?std.Thread) = std.array_list.Managed(?std.Thread).init(std.heap.c_allocator);
+pub var helpers_live: bool = false;
+
+pub fn helpers_are_live() bool {
+    return @atomicLoad(bool, &helpers_live, .acquire);
+}
+
+fn parallel_range(start: usize, end: usize, comptime f: fn (usize, usize) void) void {
+    if (end <= start) return;
+    const count = end - start;
+    const cpus = std.Thread.getCpuCount() catch 1;
+    const workers = @max(1, @min(count, @min(cpus, MAX_THREADS)));
+    if (workers == 1) {
+        f(start, end);
+        return;
+    }
+
+    var handles: [MAX_THREADS]?std.Thread = undefined;
+    const chunk = count / workers;
+    for (0..workers) |w| {
+        const s = start + w * chunk;
+        const e = if (w == workers - 1) end else start + (w + 1) * chunk;
+        handles[w] = std.Thread.spawn(.{ .stack_size = 1024 * 1024 }, f, .{ s, e }) catch null;
+        if (handles[w] == null) f(s, e);
+    }
+    for (0..workers) |w| {
+        if (handles[w]) |t| t.join();
+    }
+}
+
+fn init_helper_range(start: usize, end: usize) void {
+    var i = start;
+    while (i < end) : (i += 1) {
+        helper_searchers.items[i].init();
+    }
+}
+
+fn reset_helper_range(start: usize, end: usize) void {
+    var i = start;
+    while (i < end) : (i += 1) {
+        helper_searchers.items[i].age_pending = false;
+        helper_searchers.items[i].has_searched = false;
+        helper_searchers.items[i].reset_heuristics(true);
+    }
+}
+
+pub fn ensure_helpers(n: usize) void {
+    if (helpers_are_live()) return;
+    const old_len = helper_searchers.items.len;
+    if (n <= old_len) return;
+
+    helper_searchers.ensureTotalCapacity(n) catch {
+        NUM_THREADS = @min(NUM_THREADS, old_len);
+        return;
+    };
+    threads.ensureTotalCapacity(n) catch {
+        NUM_THREADS = @min(NUM_THREADS, old_len);
+        return;
+    };
+    helper_searchers.appendNTimesAssumeCapacity(undefined, n - old_len);
+    threads.appendNTimesAssumeCapacity(null, n - old_len);
+
+    parallel_range(old_len, n, init_helper_range);
+}
+
+pub fn helper_count() usize {
+    return helper_searchers.items.len;
+}
 
 pub fn reset_helper_heuristics() void {
-    for (helper_searchers.items) |*helper| {
-        helper.age_pending = false;
-        helper.reset_heuristics(true);
-    }
+    parallel_range(0, helper_searchers.items.len, reset_helper_range);
 }
 
 pub const Searcher = struct {
@@ -162,13 +231,14 @@ pub const Searcher = struct {
     history: [2][64][64]i32 = undefined,
 
     counter_moves: [2][64][64]types.Move = undefined,
-    continuation: *[12][64][64][64]i32,
+    continuation: *[12][64][64][64]i16,
 
     root_board: *position.Position,
     ttable: *tt.TranspositionTable = &tt.GlobalTT,
     thread_id: usize = 0,
     silent_output: bool = false,
     age_pending: bool = false,
+    has_searched: bool = false,
 
     node_spent_table: [64][64]u64 = undefined,
 
@@ -180,7 +250,7 @@ pub const Searcher = struct {
         const board = std.heap.c_allocator.create(position.Position) catch unreachable;
         board.init();
         self.* = .{
-            .continuation = std.heap.c_allocator.create([12][64][64][64]i32) catch unreachable,
+            .continuation = std.heap.c_allocator.create([12][64][64][64]i16) catch unreachable,
             .root_board = board,
         };
         self.hash_history = std.array_list.Managed(u64).initCapacity(std.heap.c_allocator, MAX_GAMEPLY) catch unreachable;
@@ -196,6 +266,7 @@ pub const Searcher = struct {
     pub fn deinit(self: *Searcher) void {
         self.hash_history.deinit();
         std.heap.c_allocator.destroy(self.continuation);
+        self.root_board.deinit();
         std.heap.c_allocator.destroy(self.root_board);
     }
 
@@ -376,6 +447,7 @@ pub const Searcher = struct {
         self.parent_nodes = null;
         self.shared_nodes.store(0, .monotonic);
         self.root_history_len = self.hash_history.items.len;
+        pos.evaluator.nnue_evaluator.reset_depth();
         self.time_stop = false;
         self.reset_heuristics(false);
         self.nodes = 0;
@@ -453,22 +525,12 @@ pub const Searcher = struct {
         var previous_iteration_nodes: u64 = 0;
         var previous_iteration_node_cost: u64 = 0;
 
-        const extra = if (NUM_THREADS > helper_searchers.items.len) NUM_THREADS - helper_searchers.items.len else 0;
-        const existing_helpers = NUM_THREADS - extra;
-        helper_searchers.ensureTotalCapacity(NUM_THREADS) catch unreachable;
-        helper_searchers.appendNTimesAssumeCapacity(undefined, extra);
-        threads.ensureTotalCapacity(NUM_THREADS) catch unreachable;
-        threads.appendNTimesAssumeCapacity(null, extra);
-        var ti: usize = existing_helpers;
-        while (ti < NUM_THREADS) : (ti += 1) {
-            helper_searchers.items[ti] = Searcher.new();
-        }
-
-        ti = 0;
+        ensure_helpers(NUM_THREADS);
+        var ti: usize = 0;
         while (ti < NUM_THREADS) : (ti += 1) {
             helper_searchers.items[ti].nodes = 0;
             helper_searchers.items[ti].tbhits = 0;
-            helper_searchers.items[ti].age_pending = ti < existing_helpers;
+            helper_searchers.items[ti].age_pending = helper_searchers.items[ti].has_searched;
         }
 
         var tdepth: usize = 1;
@@ -765,6 +827,7 @@ pub const Searcher = struct {
     }
 
     pub fn helpers(self: *Searcher, pos: *position.Position, comptime color: types.Color, depth_: usize, alpha_: i32, beta_: i32) void {
+        @atomicStore(bool, &helpers_live, true, .release);
         var i: usize = 0;
         while (i < NUM_THREADS) : (i += 1) {
             const id: usize = i + 1;
@@ -787,7 +850,15 @@ pub const Searcher = struct {
             if (self.syzygy_root_active) {
                 helper_searchers.items[i].syzygy_root = self.syzygy_root;
             }
-            helper_searchers.items[i].root_board.* = pos.*;
+            const helper_board = helper_searchers.items[i].root_board;
+            const helper_stack = helper_board.evaluator.nnue_evaluator.stack;
+            const root_accumulator = pos.evaluator.nnue_evaluator.current().*;
+            helper_board.* = pos.*;
+            const helper_nnue = &helper_board.evaluator.nnue_evaluator;
+            helper_nnue.stack = helper_stack;
+            helper_nnue.depth = 0;
+            helper_nnue.frame_written = true;
+            helper_nnue.current().* = root_accumulator;
             helper_searchers.items[i].hash_history.clearRetainingCapacity();
             helper_searchers.items[i].hash_history.appendSlice(self.hash_history.items) catch {};
             @atomicStore(bool, &helper_searchers.items[i].stop, false, .monotonic);
@@ -804,6 +875,7 @@ pub const Searcher = struct {
 
     pub fn start_helper(self: *Searcher, color: types.Color, depth_: usize, alpha_: i32, beta_: i32) void {
         @atomicStore(bool, &self.is_searching, true, .release);
+        self.has_searched = true;
         if (self.age_pending) {
             self.age_pending = false;
             self.reset_heuristics(false);
@@ -814,6 +886,7 @@ pub const Searcher = struct {
         self.force_thinking = true;
         self.ply = 0;
         self.seldepth = 0;
+
         if (color == types.Color.White) {
             _ = self.negamax(self.root_board, types.Color.White, depth_, alpha_, beta_, false, NodeType.Root, false);
         } else {
@@ -824,6 +897,7 @@ pub const Searcher = struct {
 
     pub fn stop_helpers(self: *Searcher) void {
         _ = self;
+        defer @atomicStore(bool, &helpers_live, false, .release);
         var i: usize = 0;
         while (i < NUM_THREADS) : (i += 1) {
             @atomicStore(bool, &helper_searchers.items[i].stop, true, .monotonic);
@@ -975,7 +1049,7 @@ pub const Searcher = struct {
                         .static_eval = tt.EVAL_NONE,
                         .bestmove = types.Move.empty(),
                         .flag = tb_flag,
-                        .depth = @as(u8, @intCast(depth)),
+                        .depth = @as(u8, @intCast(@min(depth, 255))),
                         .was_pv = 0,
                         .key = @as(u32, @truncate(pos.hash)),
                         .age = self.ttable.age,
@@ -1040,6 +1114,7 @@ pub const Searcher = struct {
                 self.moved_piece_history[self.ply] = types.Piece.NO_PIECE;
                 self.ply += 1;
                 pos.play_null_move();
+                self.ttable.prefetch(pos.hash);
                 var null_score = -self.negamax(pos, opp_color, depth - r, -beta, -beta + 1, true, NodeType.NonPV, !cutnode);
                 self.ply -= 1;
                 pos.undo_null_move();
@@ -1140,7 +1215,7 @@ pub const Searcher = struct {
                                     .static_eval = pack_static_eval(static_eval),
                                     .bestmove = move,
                                     .flag = tt.Bound.Lower,
-                                    .depth = @as(u8, @intCast(depth - parameters.ProbCutReduction + 1)),
+                                    .depth = @as(u8, @intCast(@min(depth - parameters.ProbCutReduction + 1, 255))),
                                     .was_pv = 0,
                                     .key = @as(u32, @truncate(pos.hash)),
                                     .age = self.ttable.age,
@@ -1309,13 +1384,13 @@ pub const Searcher = struct {
 
             const nodes_before = self.nodes;
 
+            self.ttable.prefetch(pos.prefetch_key_after(move));
+
             self.move_history[self.ply] = move;
             self.moved_piece_history[self.ply] = pos.mailbox[move.from];
             self.ply += 1;
             pos.play_move(color, move);
             self.hash_history.append(pos.hash) catch {};
-
-            self.ttable.prefetch(pos.hash);
 
             var score: i32 = 0;
             const min_lmr_move: usize = if (on_pv) parameters.LMRMinMovePV else parameters.LMRMinMoveNonPV;
@@ -1448,12 +1523,10 @@ pub const Searcher = struct {
                             const prev = self.move_history[self.ply - plies_ago - 1];
                             if (prev.to_u16() == 0) continue;
 
-                            const cont_hist = self.continuation[self.moved_piece_history[self.ply - plies_ago - 1].pure_index()][prev.to][m.from][m.to] * adj;
-                            if (is_best) {
-                                self.continuation[self.moved_piece_history[self.ply - plies_ago - 1].pure_index()][prev.to][m.from][m.to] += adj - @divTrunc(cont_hist, max_history);
-                            } else {
-                                self.continuation[self.moved_piece_history[self.ply - plies_ago - 1].pure_index()][prev.to][m.from][m.to] += -adj - @divTrunc(cont_hist, max_history);
-                            }
+                            const slot = &self.continuation[self.moved_piece_history[self.ply - plies_ago - 1].pure_index()][prev.to][m.from][m.to];
+                            const cont_hist = @as(i32, slot.*) * adj;
+                            const bonus = if (is_best) adj else -adj;
+                            slot.* += @intCast(bonus - @divTrunc(cont_hist, max_history));
                         }
                     }
                 }
@@ -1491,7 +1564,7 @@ pub const Searcher = struct {
                 .static_eval = pack_static_eval(static_eval),
                 .bestmove = best_move,
                 .flag = tt_flag,
-                .depth = @as(u8, @intCast(depth)),
+                .depth = @as(u8, @intCast(@min(depth, 255))),
                 .was_pv = if (on_pv) @as(u1, 1) else @as(u1, 0),
                 .key = @as(u32, @truncate(pos.hash)),
                 .age = self.ttable.age,
@@ -1634,12 +1707,13 @@ pub const Searcher = struct {
                 }
             }
 
+            self.ttable.prefetch(pos.prefetch_key_after(move));
+
             self.move_history[self.ply] = move;
             self.moved_piece_history[self.ply] = pos.mailbox[move.from];
             self.ply += 1;
             pos.play_move(color, move);
             self.hash_history.append(pos.hash) catch {};
-            self.ttable.prefetch(pos.hash);
             const score = -self.quiescence_search(pos, opp_color, -beta, -alpha);
             self.ply -= 1;
             pos.undo_move(color, move);

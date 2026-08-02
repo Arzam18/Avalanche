@@ -51,6 +51,10 @@ pub const UciInterface = struct {
             @atomicStore(bool, &self.searcher.stop, true, .monotonic);
             self.join_search();
             self.searcher.deinit();
+            self.position.deinit();
+            for (search.helper_searchers.items) |*helper| {
+                helper.deinit();
+            }
             search.helper_searchers.deinit();
             search.threads.deinit();
             syzygy.deinit();
@@ -163,8 +167,10 @@ pub const UciInterface = struct {
                         const installed_mb = tt.GlobalTT.size * @sizeOf(tt.Item) / tt.MB;
                         if (installed_mb < clamped) {
                             try stdout.print("info string Hash: failed to allocate {} MB, still using {} MB\n", .{ clamped, installed_mb });
-                            try stdout.flush();
                         }
+                        const huge_mb = tt.GlobalTT.huge_page_bytes / tt.MB;
+                        try stdout.print("info string Hash: {} MB, {} MB on huge pages\n", .{ installed_mb, huge_mb });
+                        try stdout.flush();
                     } else if (std.mem.eql(u8, token.?, "Threads")) {
                         token = tokens.next();
                         if (token == null or !std.mem.eql(u8, token.?, "value")) {
@@ -179,6 +185,12 @@ pub const UciInterface = struct {
                         const value = std.fmt.parseUnsigned(usize, token.?, 10) catch 1;
                         const total = std.math.clamp(value, 1, search.MAX_THREADS);
                         search.NUM_THREADS = total - 1;
+                        search.THREADS_CONFIGURED = true;
+                        search.ensure_helpers(search.NUM_THREADS);
+                        if (search.helper_count() < total - 1) {
+                            try stdout.print("info string Threads: failed to allocate {} helpers, using {}\n", .{ total - 1, search.helper_count() + 1 });
+                            try stdout.flush();
+                        }
                     } else if (std.mem.eql(u8, token.?, "MoveOverhead")) {
                         token = tokens.next();
                         if (token == null or !std.mem.eql(u8, token.?, "value")) {
