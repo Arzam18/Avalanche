@@ -28,6 +28,53 @@ pub fn init_lmr() void {
     }
 }
 
+inline fn reserve_next_iteration(
+    elapsed_ms: u64,
+    max_millis: u64,
+    depth: usize,
+    stability: usize,
+    score_delta: i32,
+    factor: f32,
+    iteration_cost: u64,
+    previous_iteration_cost: u64,
+    iteration_nodes: u64,
+    previous_iteration_nodes: u64,
+) bool {
+    if (stability < 1 or score_delta > 24 or previous_iteration_cost == 0 or previous_iteration_nodes == 0) return false;
+    const remaining = @max(@as(u64, 1), max_millis -| elapsed_ms);
+    const time_growth = std.math.clamp(
+        @as(f32, @floatFromInt(iteration_cost)) / @as(f32, @floatFromInt(previous_iteration_cost)),
+        0.25,
+        8.0,
+    );
+    const node_growth = std.math.clamp(
+        @as(f32, @floatFromInt(iteration_nodes)) / @as(f32, @floatFromInt(previous_iteration_nodes)),
+        0.25,
+        8.0,
+    );
+    const efficiency_growth = std.math.clamp(time_growth / node_growth, 0.25, 4.0);
+    const scale = @max(@as(f32, 1.0), @as(f32, @floatFromInt(iteration_cost)) * @sqrt(time_growth));
+    const slack = std.math.clamp(@log(@as(f32, @floatFromInt(remaining)) / scale), -4.0, 4.0);
+    const time_term = std.math.clamp(@log(time_growth), -2.0, 2.0);
+    const node_term = std.math.clamp(@log(node_growth), -2.0, 2.0);
+    const efficiency_term = std.math.clamp(@log(efficiency_growth), -1.4, 1.4);
+    const depth_term = std.math.clamp((@as(f32, @floatFromInt(depth)) - 16.0) / 12.0, -1.0, 1.0);
+    const stability_term = @as(f32, @floatFromInt(@min(stability, 8))) / 8.0;
+    const score_term = @as(f32, @floatFromInt(@min(score_delta, 128))) / 128.0;
+    const factor_term = std.math.clamp(factor, 0.5, 2.5) / 2.5;
+    const completion_logit =
+        0.831925 +
+        1.278403 * slack +
+        0.553568 * time_term +
+        0.557034 * node_term -
+        0.002354 * efficiency_term -
+        0.398757 * depth_term -
+        0.122777 * stability_term -
+        0.073597 * score_term -
+        1.064737 * factor_term;
+    return completion_logit <= 0.0;
+}
+
 pub const MAX_PLY = 200;
 pub const MAX_GAMEPLY = 1024;
 
@@ -401,6 +448,10 @@ pub const Searcher = struct {
         var bm = types.Move.empty();
 
         var stability: usize = 0;
+        var previous_iteration_end_ms: u64 = 0;
+        var previous_iteration_cost: u64 = 0;
+        var previous_iteration_nodes: u64 = 0;
+        var previous_iteration_node_cost: u64 = 0;
 
         const extra = if (NUM_THREADS > helper_searchers.items.len) NUM_THREADS - helper_searchers.items.len else 0;
         const existing_helpers = NUM_THREADS - extra;
@@ -578,9 +629,31 @@ pub const Searcher = struct {
                 factor *= node_scale;
             }
 
+            const elapsed_ms = self.timer.read() / std.time.ns_per_ms;
+            const iteration_cost = @max(@as(u64, 1), elapsed_ms -| previous_iteration_end_ms);
+            const iteration_nodes = @max(@as(u64, 1), self.nodes -| previous_iteration_nodes);
+            const normal_stop = self.should_not_continue(factor);
+            const score_delta: i32 = @intCast(@abs(score - prev_score));
+            const reserve_stop = !normal_stop and !self.force_thinking and self.ideal_time < self.max_millis and
+                reserve_next_iteration(
+                    elapsed_ms,
+                    self.max_millis,
+                    tdepth,
+                    stability,
+                    score_delta,
+                    factor,
+                    iteration_cost,
+                    previous_iteration_cost,
+                    iteration_nodes,
+                    previous_iteration_node_cost,
+                );
+            previous_iteration_end_ms = elapsed_ms;
+            previous_iteration_cost = iteration_cost;
+            previous_iteration_nodes = self.nodes;
+            previous_iteration_node_cost = iteration_nodes;
             prev_score = score;
 
-            if (self.should_not_continue(factor)) {
+            if (normal_stop or reserve_stop) {
                 break;
             }
 
