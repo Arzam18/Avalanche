@@ -91,6 +91,13 @@ Avalanche follows the UCI protocol and is not a full chess application. You shou
 
 All Neural Networks used by Avalanche are trained through self-play. There have been several generations of reinforcement learning, listed below by codenames:
 
+- Nezha 哪吒
+  - `768x16 -> 1024 -> 8`
+  - Fine-tuned Zidingxiang v2 on 1.6 billion filtered self-play positions
+- Zidingxiang 紫丁香
+  - `768x16 -> 1024 -> 8`
+  - Fine-tuned Huangpujiang on self-play positions
+  - Refined through a second continuation wave
 - Huangpujiang 黄浦江
   - `768x16 -> 1024 -> 8`
   - Dual-perspective, mirrored input buckets basedon king position

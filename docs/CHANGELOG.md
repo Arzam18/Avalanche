@@ -1,5 +1,16 @@
 # v3.1.0
 
+- New net: Nezha
+
+LTC (60+0.60):
+```
+Elo   | 10.57 +- 4.37 (95%)
+SPRT  | 60.0+0.6s Threads=1 Hash=64MB
+LLR   | 2.96 (-2.94, 2.94) [0.00, 3.00]
+Games | N: 6084 W: 1377 L: 1192 D: 3515
+Penta | [11, 626, 1586, 805, 14]
+```
+
 - New net: Zidingxiang 2
 
 STC (10+0.10) vs Zidingxiang:
