@@ -1,4 +1,78 @@
-# v3.1.0
+# v4.0.0
+
+- Match Results
+
+STC vs Avalanche 3.0.0:
+```
+Elo   | 249.83 +- 10.16 (95%)
+Conf  | 10.0+0.10s Threads=1 Hash=8MB
+Games | N: 3000 W: 1985 L: 136 D: 879
+Penta | [2, 14, 183, 735, 566]
+```
+
+LTC vs Avalanche 3.0.0:
+```
+Elo   | 239.09 +- 9.26 (95%)
+Conf  | 60.0+0.60s Threads=1 Hash=256MB
+Games | N: 2500 W: 1559 L: 67 D: 874
+Penta | [0, 6, 116, 758, 370]
+```
+
+LTC vs Stockfish 11:
+```
+Elo   | 88.29 +- 8.36 (95%)
+Conf  | 60.0+0.60s Threads=1 Hash=256MB
+Games | N: 2500 W: 1092 L: 470 D: 938
+Penta | [10, 120, 460, 558, 102]
+```
+
+LTC vs Igel 3.6.0:
+```
+Elo   | -16.27 +- 7.54 (95%)
+Conf  | 60.0+0.60s Threads=1 Hash=256MB
+Games | N: 2500 W: 598 L: 715 D: 1187
+Penta | [21, 370, 575, 273, 11]
+```
+
+LTC vs Black Marlin 9.0:
+```
+Elo   | 19.62 +- 7.59 (95%)
+Conf  | 60.0+0.60s Threads=1 Hash=256MB
+Games | N: 2500 W: 681 L: 540 D: 1279
+Penta | [16, 244, 602, 359, 29]
+```
+
+LTC vs Bread 4.0.0:
+```
+Elo   | 9.17 +- 7.39 (95%)
+Conf  | 60.0+0.60s Threads=1 Hash=256MB
+Games | N: 2500 W: 646 L: 580 D: 1274
+Penta | [17, 272, 601, 348, 12]
+```
+
+LTC vs Koivisto 9.0:
+```
+Elo   | -41.89 +- 7.50 (95%)
+Conf  | 60.0+0.60s Threads=1 Hash=256MB
+Games | N: 2500 W: 460 L: 760 D: 1280
+Penta | [38, 434, 572, 202, 4]
+```
+
+SMP vs Avalanche 3.0.0 (4 Threads):
+```
+Elo   | 200.24 +- 22.43 (95%)
+Conf  | 60.0+0.60s Threads=4 Hash=2048MB
+Games | N: 300 W: 167 L: 11 D: 122
+Penta | [0, 1, 18, 105, 26]
+```
+
+VLTC SMP vs Avalanche 3.0.0 (48 Threads):
+```
+Elo   | 195.51 +- 38.75 (95%)
+Conf  | 180.0+2.0s Threads=48 Hash=32768MB
+Games | N: 100 W: 54 L: 3 D: 43
+Penta | [0, 0, 7, 35, 8]
+```
 
 - New net: Nezha
 
@@ -9,6 +83,26 @@ SPRT  | 60.0+0.6s Threads=1 Hash=64MB
 LLR   | 2.96 (-2.94, 2.94) [0.00, 3.00]
 Games | N: 6084 W: 1377 L: 1192 D: 3515
 Penta | [11, 626, 1586, 805, 14]
+```
+
+- Optimizations
+
+STC (10+0.10):
+```
+Elo   | 42.82 +- 9.54 (95%)
+SPRT  | 10.0+0.10s Threads=1 Hash=8MB
+LLR   | 2.95 (-2.94, 2.94) [-3.00, 0.50]
+Games | N: 1264 W: 366 L: 211 D: 687
+Penta | [2, 81, 314, 230, 5]
+```
+
+LTC (60+0.60):
+```
+Elo   | 56.70 +- 10.37 (95%)
+SPRT  | 60.0+0.60s Threads=1 Hash=256MB
+LLR   | 2.95 (-2.94, 2.94) [-3.00, 0.50]
+Games | N: 1020 W: 305 L: 140 D: 575
+Penta | [0, 50, 252, 201, 7]
 ```
 
 - New net: Zidingxiang 2
