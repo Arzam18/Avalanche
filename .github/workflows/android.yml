@@ -1,0 +1,43 @@
+name: Build Android
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "*" ]
+  pull_request:
+    branches: [ "*" ]
+
+permissions:
+  contents: write
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Setup Zig 0.16.0
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build Avalanche for Android (ARM64 Musl)
+        run: |
+          # Cross-compile to aarch64-linux-musl so Zig provides the C library natively
+          zig build --release=fast -Dtarget=aarch64-linux-musl -Dtarget-name="Avalanche" --prefix dist
+
+      - name: Verify Binary
+        run: |
+          ls -lh dist/bin/
+          file dist/bin/*
+
+      - name: Upload Android Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: avalanche-android-arm64
+          path: dist/bin/*
