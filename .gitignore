@@ -23,6 +23,11 @@ cutechess-cli
 
 *.json
 !scripts/datagen_a_lot.json
+!web/package.json
+!web/package-lock.json
+!web/tsconfig.json
+!web/tsconfig.build.json
+!web/biome.json
 
 .zig-cache
 **/zig-**
@@ -69,3 +74,7 @@ scripts/openbench_inject_final.sh
 ideas/
 search_patches/
 search_ideas.md
+
+!tools/datatool/tests/fixtures/*.json
+!tools/datatool/tests/fixtures/frc.epd
+tools/datatool/target/

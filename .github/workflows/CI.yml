@@ -2,9 +2,12 @@
 
 name: CI
 
+# Tests run on master, on pull requests into it, and weekly. Feature branches
+# are tested through their pull request instead of on every push.
 on:
   push:
-    branches: ["**"]
+    branches: [master]
+    tags: ["v*"]
   pull_request:
     branches: [master]
   workflow_dispatch:
@@ -49,14 +52,25 @@ jobs:
           zig version
           zig env
 
+      # Unit tests do not compile the UCI frontend; one Debug build covers it.
       - name: Debug build
+        if: runner.os == 'Linux'
         run: zig build
 
       - name: Release build
         run: zig build --release=fast
 
+      - name: OpenBench build contract
+        if: runner.os == 'Linux'
+        run: scripts/openbench_build_check.sh
+
       - name: Unit tests
         run: zig build test
+
+      # The default network is multi-layer; this covers the single-layer head.
+      - name: Unit tests (single-layer head)
+        if: runner.os == 'Linux'
+        run: zig build test -Dnet=nets/dianguang-1.nnue
 
       # The release build above leaves the binary at zig-out/bin/Avalanche[.exe].
       # The expected node count is NOT hardcoded here -- it is read from the
@@ -108,13 +122,75 @@ jobs:
           [ "$fail" -eq 0 ] || exit 1
           echo "OK: UCI smoke test passed (uciok / readyok / bestmove)"
 
-  # Cross-compile optimized release binaries for the standard platforms and
-  # upload them. Runs only after the matrix passes, on push-to-master and manual
-  # dispatch -- never on pull requests (so forks cannot trigger artifact builds).
+      - name: UCI protocol tests
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then BIN="./zig-out/bin/Avalanche.exe"; else BIN="./zig-out/bin/Avalanche"; fi
+          python3 scripts/uci_protocol_test.py "$BIN"
+
+  datatool:
+    name: datatool
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: tools/datatool
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --check
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test
+
+  wasm:
+    name: wasm / node
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Zig ${{ env.ZIG_VERSION }}
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Install web dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Type check and lint
+        working-directory: web
+        run: |
+          npm run check
+          npm run lint
+
+      - name: Web tests (builds wasm and native release)
+        working-directory: web
+        run: npm test
+
+      - name: UCI protocol tests on wasm
+        run: python3 scripts/uci_protocol_test.py node web/src/node/cli.ts zig-out/web/avalanche.wasm
+
+  # Cross-compile release binaries (native + wasm) and upload them. This is the
+  # slowest job, so it runs only for version tags (v*) and manual dispatch, never
+  # per commit or on pull requests (so forks cannot trigger artifact builds).
   artifacts:
     name: release artifacts
-    needs: build
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
+    needs: [build, wasm]
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -127,6 +203,9 @@ jobs:
           version: ${{ env.ZIG_VERSION }}
 
       - name: Cross-compile release binaries
+        env:
+          # Tag builds report the tag's version (v4.1.0 -> 4.1.0); manual runs are dev builds.
+          VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'dev' }}
         run: bash build_all_v3.sh
 
       - name: Upload artifacts

@@ -44,7 +44,7 @@ pub fn timestamp2DateTime(timestamp: i64) DateTime {
 // End of Simple DateTime lib
 
 fn dtToString(dt: DateTime, buf: []u8) []const u8 {
-    return std.fmt.bufPrint(buf, "Compiled at {:0>4}-{:0>2}-{:0>2}-{:0>2}:{:0>2}", .{ dt.year, dt.month, dt.day, dt.hour, dt.minute }) catch unreachable;
+    return std.fmt.bufPrint(buf, "Compiled at {:0>4}-{:0>2}-{:0>2}-{:0>2}:{:0>2} UTC", .{ dt.year, dt.month, dt.day, dt.hour, dt.minute }) catch unreachable;
 }
 
 fn addPyrrhic(b: *std.Build, compile: *std.Build.Step.Compile) void {
@@ -64,24 +64,37 @@ pub fn build(b: *std.Build) void {
     const targetName = b.option([]const u8, "target-name", "Change the out name of the binary") orelse "Avalanche";
     // The embedded NNUE is selectable via -Dnet=<path> without editing this file.
     // It is imported under the name "nnue", which weights.zig @embedFile's.
-    const netPath = b.option([]const u8, "net", "Path to the .nnue file to embed") orelse "nets/nezha.nnue";
+    const netPath = b.option([]const u8, "net", "Path to the .nnue file to embed") orelse "nets/dianguang-3.nnue";
+    const net: std.Build.LazyPath = if (std.fs.path.isAbsolute(netPath))
+        .{ .cwd_relative = netPath }
+    else
+        b.path(netPath);
     const inputBuckets = b.option(usize, "buckets", "King input buckets (1=Chess768, 16=buckets+HM)") orelse 16;
     if (inputBuckets != 1 and inputBuckets != 16) {
         @panic("-Dbuckets must be 1 (Chess768) or 16 (ChessBucketsMirrored)");
     }
+
+    // The layers after the feature transformer; see docs/NNUE.md. `auto` reads
+    // it off the embedded network's header.
+    const HeadOption = enum { auto, single, multi };
+    const head = b.option(HeadOption, "head", "NNUE head: auto (from the -Dnet file, default), single or multi") orelse .auto;
 
     // Standard optimization options allow the person running `zig build` to select
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     const optimize = b.standardOptimizeOption(.{});
 
     const build_options = b.addOptions();
-    // var buf: [64]u8 = undefined;
-    // var io_threaded: std.Io.Threaded = .init(std.heap.page_allocator, .{});
-    // defer io_threaded.deinit();
-    // const now_seconds = std.Io.Clock.real.now(io_threaded.io()).toSeconds();
-    // build_options.addOption([]const u8, "version", dtToString(timestamp2DateTime(now_seconds), &buf));
-    build_options.addOption([]const u8, "version", "4.0.0");
+    // Dev builds identify themselves by build time; releases pass -Dversion=X.Y.Z.
+    var buf: [64]u8 = undefined;
+    var io_threaded: std.Io.Threaded = .init(std.heap.page_allocator, .{});
+    defer io_threaded.deinit();
+    const now_seconds = std.Io.Clock.real.now(io_threaded.io()).toSeconds();
+    const version = b.option([]const u8, "version", "Release version reported by `uci` (default: build timestamp)") orelse
+        dtToString(timestamp2DateTime(now_seconds), &buf);
+    build_options.addOption([]const u8, "version", version);
     build_options.addOption(usize, "input_buckets", inputBuckets);
+    build_options.addOption(HeadOption, "head", head);
+    build_options.addOption([]const u8, "net_name", std.fs.path.stem(netPath));
 
     const exe = b.addExecutable(.{
         .name = targetName,
@@ -94,7 +107,7 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addOptions("build_options", build_options);
     exe.root_module.addAnonymousImport("nnue", .{
-        .root_source_file = b.path(netPath),
+        .root_source_file = net,
     });
 
     addPyrrhic(b, exe);
@@ -110,7 +123,9 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
+    const test_filter = b.option([]const u8, "test-filter", "Run only the unit tests whose name contains this text");
     const exe_tests = b.addTest(.{
+        .filters = if (test_filter) |filter| b.dupeStrings(&.{filter}) else &.{},
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/tests.zig"),
             .target = target,
@@ -121,12 +136,44 @@ pub fn build(b: *std.Build) void {
 
     exe_tests.root_module.addOptions("build_options", build_options);
     exe_tests.root_module.addAnonymousImport("nnue", .{
-        .root_source_file = b.path(netPath),
+        .root_source_file = net,
     });
 
     addPyrrhic(b, exe_tests);
 
+    const wasm = b.addExecutable(.{
+        .name = "avalanche",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/wasm.zig"),
+            .target = b.resolveTargetQuery(.{
+                .cpu_arch = .wasm32,
+                .os_tag = .freestanding,
+                .cpu_model = .{ .explicit = &std.Target.wasm.cpu.generic },
+                .cpu_features_add = std.Target.wasm.featureSet(&.{.simd128}),
+            }),
+            .optimize = optimize,
+            .single_threaded = true,
+            .strip = optimize != .Debug,
+        }),
+    });
+    wasm.entry = .disabled;
+    wasm.rdynamic = true;
+    wasm.stack_size = 16 * 1024 * 1024;
+    wasm.root_module.addOptions("build_options", build_options);
+    wasm.root_module.addAnonymousImport("nnue", .{
+        .root_source_file = net,
+    });
+
+    const install_wasm = b.addInstallArtifact(wasm, .{ .dest_dir = .{ .override = .{ .custom = "web" } } });
+    const wasm_step = b.step("wasm", "Build the WebAssembly engine into zig-out/web");
+    wasm_step.dependOn(&install_wasm.step);
+
     const run_tests = b.addRunArtifact(exe_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
+
+    // For running the unit tests on another machine, e.g. `-Dtarget=aarch64-linux-gnu`.
+    const install_tests = b.addInstallArtifact(exe_tests, .{ .dest_sub_path = "avalanche-tests" });
+    const test_exe_step = b.step("test-exe", "Install the unit-test binary as zig-out/bin/avalanche-tests");
+    test_exe_step.dependOn(&install_tests.step);
 }

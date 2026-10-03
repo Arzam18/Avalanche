@@ -11,13 +11,16 @@
 // the search short-circuits, and the `bench` node count is unchanged.
 
 const std = @import("std");
+const platform = @import("../platform.zig");
 const types = @import("../chess/types.zig");
 const tables = @import("../chess/tables.zig");
 const position = @import("../chess/position.zig");
 
-const c = @cImport({
+pub const supported = !platform.is_wasm;
+
+const c = if (supported) @cImport({
     @cInclude("tbprobe.h");
-});
+}) else struct {};
 
 pub const MAX_TB_MOVES: usize = 256; // == Pyrrhic TB_MAX_MOVES
 
@@ -26,11 +29,17 @@ pub var probe_depth: i32 = 1;
 pub var use_rule50: bool = true;
 pub var probe_limit: i32 = 7;
 
+pub inline fn active() bool {
+    return supported and enabled;
+}
+
 pub inline fn max_pieces() i32 {
+    if (!supported) return 0;
     return @min(@as(i32, @intCast(c.TB_LARGEST)), probe_limit);
 }
 
 pub fn init(path: [*:0]const u8) bool {
+    if (!supported) return false;
     if (enabled) {
         c.tb_free();
         enabled = false;
@@ -42,7 +51,7 @@ pub fn init(path: [*:0]const u8) bool {
 }
 
 pub fn deinit() void {
-    if (enabled) {
+    if (active()) {
         c.tb_free();
         enabled = false;
     }
@@ -114,9 +123,7 @@ pub inline fn piece_count(pos: *const position.Position) i32 {
 }
 
 pub inline fn no_castling_rights(pos: *const position.Position) bool {
-    const e = pos.history[pos.game_ply].entry;
-    return (e & types.WhiteOOMask) != 0 and (e & types.WhiteOOOMask) != 0 and
-        (e & types.BlackOOMask) != 0 and (e & types.BlackOOOMask) != 0;
+    return pos.castling_rights() == 0;
 }
 
 /// WDL probe for interior search nodes. The caller must ensure: not the root,
@@ -176,6 +183,12 @@ pub fn probe_wdl_bb(
         c.TB_LOSS => WdlResult.loss,
         else => null, // TB_RESULT_FAILED
     };
+}
+
+/// Raw 5-valued WDL probe of `pos`; castling rights must be absent.
+pub fn probe_wdl_position(pos: *const position.Position) ?WdlResult {
+    const p = decompose(pos);
+    return probe_wdl_bb(p.white, p.black, p.kings, p.queens, p.rooks, p.bishops, p.knights, p.pawns, p.ep, p.turn);
 }
 
 /// Root DTZ probe. Ranks every legal root move by distance-to-zero and returns
@@ -266,41 +279,49 @@ pub fn probe_root(pos: *const position.Position, has_repeated: bool) ?RootResult
 // pawn-attack colour is inverted in tbconfig.h, so `col` here is Avalanche's
 // convention (0 = white, 1 = black).
 // ---------------------------------------------------------------------------
-pub export fn popcount(x: u64) u8 {
+comptime {
+    if (supported) {
+        for (.{ "popcount", "getlsb", "poplsb", "pawnAttacks", "knightAttacks", "kingAttacks", "bishopAttacks", "rookAttacks", "queenAttacks" }) |name| {
+            @export(&@field(@This(), name), .{ .name = name });
+        }
+    }
+}
+
+pub fn popcount(x: u64) callconv(.c) u8 {
     return @popCount(x);
 }
 
-pub export fn getlsb(x: u64) u8 {
+pub fn getlsb(x: u64) callconv(.c) u8 {
     return @ctz(x);
 }
 
-pub export fn poplsb(x: *u64) u8 {
+pub fn poplsb(x: *u64) callconv(.c) u8 {
     const r: u8 = @ctz(x.*);
     x.* &= x.* -% 1;
     return r;
 }
 
-pub export fn pawnAttacks(col: u8, sq: u8) u64 {
+pub fn pawnAttacks(col: u8, sq: u8) callconv(.c) u64 {
     return if (col == 0) tables.WhitePawnAttacks[sq] else tables.BlackPawnAttacks[sq];
 }
 
-pub export fn knightAttacks(sq: u8) u64 {
+pub fn knightAttacks(sq: u8) callconv(.c) u64 {
     return tables.KnightAttacks[sq];
 }
 
-pub export fn kingAttacks(sq: u8) u64 {
+pub fn kingAttacks(sq: u8) callconv(.c) u64 {
     return tables.KingAttacks[sq];
 }
 
-pub export fn bishopAttacks(sq: u8, occ: u64) u64 {
+pub fn bishopAttacks(sq: u8, occ: u64) callconv(.c) u64 {
     return tables.get_attacks(types.PieceType.Bishop, @enumFromInt(sq), occ);
 }
 
-pub export fn rookAttacks(sq: u8, occ: u64) u64 {
+pub fn rookAttacks(sq: u8, occ: u64) callconv(.c) u64 {
     return tables.get_attacks(types.PieceType.Rook, @enumFromInt(sq), occ);
 }
 
-pub export fn queenAttacks(sq: u8, occ: u64) u64 {
+pub fn queenAttacks(sq: u8, occ: u64) callconv(.c) u64 {
     return tables.get_attacks(types.PieceType.Bishop, @enumFromInt(sq), occ) |
         tables.get_attacks(types.PieceType.Rook, @enumFromInt(sq), occ);
 }

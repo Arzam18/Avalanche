@@ -1,7 +1,9 @@
 const std = @import("std");
 const types = @import("chess/types.zig");
+const platform = @import("platform.zig");
 const tables = @import("chess/tables.zig");
 const position = @import("chess/position.zig");
+const castling = @import("chess/castling.zig");
 const zobrist = @import("chess/zobrist.zig");
 const hce = @import("engine/hce.zig");
 const weights = @import("engine/weights.zig");
@@ -11,6 +13,34 @@ const see = @import("engine/see.zig");
 const search = @import("engine/search.zig");
 const tt = @import("engine/tt.zig");
 const expect = std.testing.expect;
+
+// The C tablebase code links against callbacks syzygy.zig exports. Reference
+// it here so that they exist whichever tests -Dtest-filter keeps.
+comptime {
+    _ = @import("engine/syzygy.zig");
+}
+
+test {
+    _ = @import("tests/frc.zig");
+    _ = @import("tests/search_features.zig");
+    _ = @import("tests/correction_history.zig");
+    _ = @import("engine/strength.zig");
+    _ = @import("engine/uci/go.zig");
+    _ = @import("tests/uci_options.zig");
+    _ = @import("engine/numa.zig");
+    _ = @import("tests/thread_pool.zig");
+    _ = @import("tests/smp_root.zig");
+    _ = @import("engine/datagen/options.zig");
+    _ = @import("engine/datagen/adjudicator.zig");
+    _ = @import("tests/datagen.zig");
+    _ = @import("chess/cuckoo.zig");
+    _ = @import("chess/fen.zig");
+    _ = @import("tests/viriformat.zig");
+    _ = @import("tests/tbfilter_viri.zig");
+    _ = @import("engine/netscale.zig");
+    _ = @import("tests/netscale.zig");
+    _ = @import("tests/nnue_multi.zig");
+}
 
 test "Basic Piece and Color" {
     try expect(types.Color.White.invert() == types.Color.Black);
@@ -494,8 +524,7 @@ test "fen: starting position parse" {
     try expect(pos.piece_bitboards[types.Piece.BLACK_KING.index()] == 0x1000000000000000);
     try expect(pos.piece_bitboards[types.Piece.WHITE_ROOK.index()] == 0x81);
 
-    // "KQkq" clears all four castling mask bits in entry -> 0.
-    try expect(pos.history[pos.game_ply].entry == 0);
+    try expect(pos.castling_rights() == 0b1111);
     // No en-passant target.
     try expect(pos.history[pos.game_ply].ep_sq == types.Square.NO_SQUARE);
 }
@@ -512,14 +541,12 @@ test "fen: black-to-move and partial castling rights" {
     // Black to move, only black kingside castling available ("k").
     pos.set_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b k -"[0..]);
     try expect(pos.turn == types.Color.Black);
-    // AllCastlingMask(0x9100000000000091) with only BlackOOMask(0x9000000000000000) cleared.
-    try expect(pos.history[pos.game_ply].entry == 0x100000000000091);
+    try expect(pos.castling_rights() == castling.right(.Black, .King));
     try expect(pos.history[pos.game_ply].ep_sq == types.Square.NO_SQUARE);
 
-    // No castling rights at all: entry stays at full AllCastlingMask.
     pos.set_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - -"[0..]);
     try expect(pos.turn == types.Color.White);
-    try expect(pos.history[pos.game_ply].entry == types.AllCastlingMask);
+    try expect(pos.castling_rights() == castling.NO_RIGHTS);
 }
 
 test "fen: en-passant target square stored" {
@@ -562,7 +589,6 @@ test "fen: basic_fen board round-trips" {
     defer std.testing.allocator.destroy(pos);
     pos.init();
 
-    // basic_fen returns a sub-slice of an over-allocation; use an arena.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
@@ -701,27 +727,42 @@ test "eval: nnue weights load and dimensions" {
     try expect(weights.HIDDEN_SIZE == 1024);
     try expect(weights.OUTPUT_SIZE == 8);
     try expect(weights.INPUT_SIZE == 768 * weights.NUM_INPUT_BUCKETS);
-    for (&weights.MODEL.layer_2) |bucket| {
-        for (bucket) |weight| {
-            try expect(weight >= weights.OUTPUT_WEIGHT_MIN);
-            try expect(weight <= weights.OUTPUT_WEIGHT_MAX);
-        }
-    }
+    try weights.validate(std.mem.asBytes(weights.MODEL));
+    const single = weights.Network(.single);
+    const multi = weights.Network(.multi);
+    try expect(@sizeOf(weights.NNUEWeights) == @sizeOf(weights.Network(weights.HEAD)));
     if (weights.NUM_INPUT_BUCKETS == 1) {
-        try expect(@sizeOf(weights.NNUEWeights) == 1607744);
+        try expect(@sizeOf(single) == 1607744);
     } else {
         try expect(weights.NUM_INPUT_BUCKETS == 16);
-        try expect(@sizeOf(weights.NNUEWeights) == 25200704);
+        try expect(@sizeOf(single) == 25200704);
+        try expect(@sizeOf(multi) == 25334400);
     }
+    // The file layouts of docs/NNUE.md.
+    try expect(@offsetOf(single, "layer_1") == 0);
+    try expect(@offsetOf(single, "layer_1_bias") == weights.INPUT_SIZE * weights.HIDDEN_SIZE * 2);
+    try expect(@offsetOf(single, "head") == @offsetOf(single, "layer_1_bias") + 2048);
+    try expect(@offsetOf(weights.head_single.Weights, "layer_2_bias") == 32768);
+    try expect(@offsetOf(multi, "layer_1") == 64);
+    try expect(@offsetOf(multi, "head") == 64 + weights.INPUT_SIZE * weights.HIDDEN_SIZE * 2 + 2048);
+    const head = weights.head_multi.Weights;
+    try expect(@offsetOf(head, "l1_weights") == 0);
+    try expect(@offsetOf(head, "l1_bias") == 131072);
+    try expect(@offsetOf(head, "l2_weights") == 131584);
+    try expect(@offsetOf(head, "l2_bias") == 164352);
+    try expect(@offsetOf(head, "l3_weights") == 165376);
+    try expect(@offsetOf(head, "l3_bias") == 166400);
+    try expect(@sizeOf(head) == 166464);
 }
 
 fn evaluate_nnue_scalar(pos: *position.Position, comptime turn: types.Color) i32 {
     const accumulator = pos.evaluator.nnue_evaluator.current();
     const pieces = types.popcount_usize(pos.all_all_pieces());
     const bucket = @min((pieces -| 2) / 4, weights.OUTPUT_SIZE - 1);
-    const output_weights = &weights.MODEL.layer_2[bucket];
     const own = if (turn == types.Color.White) &accumulator.white else &accumulator.black;
     const opp = if (turn == types.Color.White) &accumulator.black else &accumulator.white;
+    if (weights.HEAD == .multi) return weights.head_multi.evaluate_scalar(&weights.MODEL.head, weights.l1_shift(&weights.MODEL.header), own, opp, bucket);
+    const output_weights = &weights.MODEL.head.layer_2[bucket];
 
     var result: i32 = 0;
     for (0..weights.HIDDEN_SIZE) |i| {
@@ -731,10 +772,10 @@ fn evaluate_nnue_scalar(pos: *position.Position, comptime turn: types.Color) i32
         result += opp_activation * opp_activation * @as(i32, output_weights[weights.HIDDEN_SIZE + i]);
     }
 
-    return @divTrunc((@divTrunc(result, 255) + @as(i32, weights.MODEL.layer_2_bias[bucket])) * 400, 255 * 64);
+    return @divTrunc((@divTrunc(result, 255) + @as(i32, weights.MODEL.head.layer_2_bias[bucket])) * 400, 255 * 64);
 }
 
-test "eval: SIMD inference matches scalar SCReLU" {
+test "eval: SIMD inference matches the scalar head" {
     tables.init_all();
     zobrist.init_zobrist();
     weights.do_nnue();
@@ -934,6 +975,36 @@ test "eval: nnue black castling OOO matches fresh" {
     try expect_nnue_matches_fresh(pos);
 }
 
+test "eval: nnue king capture into another bucket, then further moves, matches fresh" {
+    tables.init_all();
+    zobrist.init_zobrist();
+    weights.do_nnue();
+
+    const pos = try std.testing.allocator.create(position.Position);
+    defer std.testing.allocator.destroy(pos);
+    pos.init();
+    pos.set_fen("4k3/8/8/8/8/8/3p3P/4K3 w - -"[0..]);
+
+    const capture = types.Move.new_from_string(pos, "e1d2"[0..]);
+    pos.play_move(types.Color.White, capture);
+    try expect_nnue_matches_fresh(pos);
+
+    // The move after a king move updates both perspectives again.
+    const reply = types.Move.new_from_string(pos, "e8e7"[0..]);
+    pos.play_move(types.Color.Black, reply);
+    try expect_nnue_matches_fresh(pos);
+
+    const push = types.Move.new_from_string(pos, "h2h4"[0..]);
+    pos.play_move(types.Color.White, push);
+    try expect_nnue_matches_fresh(pos);
+
+    pos.undo_move(types.Color.White, push);
+    pos.undo_move(types.Color.Black, reply);
+    try expect_nnue_matches_fresh(pos);
+    pos.undo_move(types.Color.White, capture);
+    try expect_nnue_matches_fresh(pos);
+}
+
 test "eval: nnue finny revisit after leaving and returning to bucket" {
     tables.init_all();
     zobrist.init_zobrist();
@@ -1033,7 +1104,7 @@ test "eval: hce material draw classification" {
 test "search: mate in 1 (white back-rank)" {
     var io_threaded: std.Io.Threaded = .init(std.heap.page_allocator, .{});
     defer io_threaded.deinit();
-    types.GLOBAL_IO = io_threaded.io();
+    platform.io = io_threaded.io();
 
     tables.init_all();
     zobrist.init_zobrist();
@@ -1068,7 +1139,7 @@ test "search: mate in 1 (white back-rank)" {
 test "search: mate in 1 (black back-rank)" {
     var io_threaded: std.Io.Threaded = .init(std.heap.page_allocator, .{});
     defer io_threaded.deinit();
-    types.GLOBAL_IO = io_threaded.io();
+    platform.io = io_threaded.io();
 
     tables.init_all();
     zobrist.init_zobrist();
@@ -1102,7 +1173,7 @@ test "search: mate in 1 (black back-rank)" {
 test "search: forced node-limited search continues after reporting mate" {
     var io_threaded: std.Io.Threaded = .init(std.heap.page_allocator, .{});
     defer io_threaded.deinit();
-    types.GLOBAL_IO = io_threaded.io();
+    platform.io = io_threaded.io();
 
     tables.init_all();
     zobrist.init_zobrist();
@@ -1124,7 +1195,7 @@ test "search: forced node-limited search continues after reporting mate" {
     // search to continue beyond the old mate cutoff (which stopped after fewer
     // than 50,000 nodes). Search policy is deliberately independent of output.
     s.silent_output = true;
-    s.max_nodes = 60_000;
+    s.max_nodes = 100_000;
     s.stop = false;
     s.reset_heuristics(true);
 
@@ -1132,14 +1203,16 @@ test "search: forced node-limited search continues after reporting mate" {
     const mate_moves = @divTrunc(hce.MateScore - @as(i32, @intCast(@abs(score))) + 1, 2);
 
     try expect(s.total_nodes() >= s.max_nodes.?);
-    try expect(score > 0);
-    try expect(mate_moves == 8);
+    // Black mates, and the shortest mate is in 4 (d8h4 ... h4f2). How close the search gets within
+    // the node limit depends on the embedded net, so the test asserts a mate no shorter than that.
+    try expect(score >= hce.MateScore - hce.MaxMate);
+    try expect(mate_moves >= 4);
 }
 
 test "search: stalemate scores as draw" {
     var io_threaded: std.Io.Threaded = .init(std.heap.page_allocator, .{});
     defer io_threaded.deinit();
-    types.GLOBAL_IO = io_threaded.io();
+    platform.io = io_threaded.io();
 
     tables.init_all();
     zobrist.init_zobrist();
@@ -1169,7 +1242,7 @@ test "search: stalemate scores as draw" {
 test "search: deterministic node counts and score" {
     var io_threaded: std.Io.Threaded = .init(std.heap.page_allocator, .{});
     defer io_threaded.deinit();
-    types.GLOBAL_IO = io_threaded.io();
+    platform.io = io_threaded.io();
 
     tables.init_all();
     zobrist.init_zobrist();
@@ -1274,7 +1347,7 @@ test "see: absolutely pinned pawn cannot recapture" {
 test "search: maximum-mobility position exceeds 128 quiet moves safely" {
     var io_threaded: std.Io.Threaded = .init(std.heap.page_allocator, .{});
     defer io_threaded.deinit();
-    types.GLOBAL_IO = io_threaded.io();
+    platform.io = io_threaded.io();
 
     tables.init_all();
     zobrist.init_zobrist();
@@ -1309,7 +1382,7 @@ test "search: maximum-mobility position exceeds 128 quiet moves safely" {
 test "qsearch: checkmate takes precedence over fifty-move draw" {
     var io_threaded: std.Io.Threaded = .init(std.heap.page_allocator, .{});
     defer io_threaded.deinit();
-    types.GLOBAL_IO = io_threaded.io();
+    platform.io = io_threaded.io();
 
     const old_contempt = search.CONTEMPT;
     defer search.CONTEMPT = old_contempt;
@@ -1333,14 +1406,14 @@ test "qsearch: checkmate takes precedence over fifty-move draw" {
     s.force_thinking = true;
     s.silent_output = true;
     s.hash_history.append(pos.hash) catch unreachable;
-    const score = s.quiescence_search(pos, types.Color.Black, -hce.MateScore, hce.MateScore);
+    const score = s.quiescence_search(pos, types.Color.Black, .scaled, -hce.MateScore, hce.MateScore);
     try expect(score <= -hce.MateScore + hce.MaxMate);
 }
 
 test "qsearch: stalemate precedes stand-pat and TT cutoffs" {
     var io_threaded: std.Io.Threaded = .init(std.heap.page_allocator, .{});
     defer io_threaded.deinit();
-    types.GLOBAL_IO = io_threaded.io();
+    platform.io = io_threaded.io();
 
     const old_contempt = search.CONTEMPT;
     defer search.CONTEMPT = old_contempt;
@@ -1376,18 +1449,18 @@ test "qsearch: stalemate precedes stand-pat and TT cutoffs" {
     s.silent_output = true;
     s.hash_history.append(pos.hash) catch unreachable;
 
-    const tt_score = s.quiescence_search(pos, types.Color.Black, -hce.MateScore, hce.MateScore);
+    const tt_score = s.quiescence_search(pos, types.Color.Black, .scaled, -hce.MateScore, hce.MateScore);
     try expect(tt_score == -100);
 
     tt.GlobalTT.clear();
-    const stand_pat_score = s.quiescence_search(pos, types.Color.Black, -hce.MateScore, -hce.MateScore + 1);
+    const stand_pat_score = s.quiescence_search(pos, types.Color.Black, .scaled, -hce.MateScore, -hce.MateScore + 1);
     try expect(stand_pat_score == -100);
 }
 
 test "qsearch: contempt draw keeps fail-soft provenance" {
     var io_threaded: std.Io.Threaded = .init(std.heap.page_allocator, .{});
     defer io_threaded.deinit();
-    types.GLOBAL_IO = io_threaded.io();
+    platform.io = io_threaded.io();
 
     const old_contempt = search.CONTEMPT;
     defer search.CONTEMPT = old_contempt;
@@ -1416,7 +1489,11 @@ test "qsearch: contempt draw keeps fail-soft provenance" {
     const static_eval = hce.evaluate_comptime(pos, types.Color.White);
     try expect(static_eval < 100);
     const beta = @divTrunc(static_eval + 100, 2);
-    const score = s.quiescence_search(pos, types.Color.White, beta - 1, beta);
+    const score = s.quiescence_search(pos, types.Color.White, .scaled, beta - 1, beta);
     try expect(score == 100);
     try expect(tt.GlobalTT.get(pos.hash) == null);
+}
+
+test {
+    _ = platform;
 }
