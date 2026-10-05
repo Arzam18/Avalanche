@@ -91,7 +91,7 @@ test "Bitboard general" {
     try expect(types.popcount(0b0110111010010) == 7);
     try expect(types.lsb(0b01101000) == 3);
     var b: types.Bitboard = 0b01101000;
-    try expect(@intFromEnum(types.pop_lsb(&b)) == 3);
+    try expect(@backingInt(types.pop_lsb(&b)) == 3);
     try expect(b == 0b01100000);
 
     const bb_i: types.Bitboard = 0x3c18183c0000;
@@ -437,7 +437,7 @@ test "types-move: packed layout and to_u16 bit ordering" {
     }
     {
         // h7(55) -> h8(63), quiet queen promotion (PR_QUEEN = 0b0111 = 7)
-        const m = types.Move.new_from_to_flag(types.Square.h7, types.Square.h8, @as(types.MoveFlags, @enumFromInt(types.PR_QUEEN)));
+        const m = types.Move.new_from_to_flag(types.Square.h7, types.Square.h8, @as(types.MoveFlags, @fromBackingInt(@intCast(types.PR_QUEEN))));
         try expect(m.is_promotion());
         try expect(!m.is_capture());
         try expect(m.flags == 7);
@@ -445,7 +445,7 @@ test "types-move: packed layout and to_u16 bit ordering" {
     }
     {
         // h7 -> h8, queen promotion-capture (PC_QUEEN = 0b1111 = 15): both capture and promotion.
-        const m = types.Move.new_from_to_flag(types.Square.h7, types.Square.h8, @as(types.MoveFlags, @enumFromInt(types.PC_QUEEN)));
+        const m = types.Move.new_from_to_flag(types.Square.h7, types.Square.h8, @as(types.MoveFlags, @fromBackingInt(@intCast(types.PC_QUEEN))));
         try expect(m.is_promotion());
         try expect(m.is_capture());
         try expect(m.flags == 15);
@@ -1186,16 +1186,16 @@ test "search: forced node-limited search continues after reporting mate" {
     const pos = try std.testing.allocator.create(position.Position);
     defer std.testing.allocator.destroy(pos);
     pos.init();
-    pos.set_fen("rnbq1rk1/pp3ppp/8/2b1P3/1pP1P1n1/5N2/P3B1PP/RNBQRK2 b - - 4 13"[0..]);
+    pos.set_fen("2r3k1/p4p2/3Rp2p/1p2P1pK/8/1P4P1/P3Q2P/1q6 b - - 0 1"[0..]);
 
     var s = search.Searcher.new();
     defer s.deinit();
     s.force_thinking = true;
-    // A finite node limit keeps the test bounded while still requiring the
-    // search to continue beyond the old mate cutoff (which stopped after fewer
-    // than 50,000 nodes). Search policy is deliberately independent of output.
+    // Black mates in 3 and the search sees it within a few thousand nodes, where the old mate
+    // cutoff stopped. The node limit bounds the test and sits far below what the search needs to
+    // run out of depth. Search policy is deliberately independent of output.
     s.silent_output = true;
-    s.max_nodes = 100_000;
+    s.max_nodes = 30_000;
     s.stop = false;
     s.reset_heuristics(true);
 
@@ -1203,10 +1203,8 @@ test "search: forced node-limited search continues after reporting mate" {
     const mate_moves = @divTrunc(hce.MateScore - @as(i32, @intCast(@abs(score))) + 1, 2);
 
     try expect(s.total_nodes() >= s.max_nodes.?);
-    // Black mates, and the shortest mate is in 4 (d8h4 ... h4f2). How close the search gets within
-    // the node limit depends on the embedded net, so the test asserts a mate no shorter than that.
     try expect(score >= hce.MateScore - hce.MaxMate);
-    try expect(mate_moves >= 4);
+    try expect(mate_moves == 3);
 }
 
 test "search: stalemate scores as draw" {
