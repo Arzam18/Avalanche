@@ -268,11 +268,11 @@ pub const DatagenSingle = struct {
     fn resetSearchStateForGame(self: *DatagenSingle, pos: *position.Position) void {
         for (&self.searchers) |*s| {
             s.reset_heuristics(true);
-            @atomicStore(bool, &s.stop, false, .monotonic);
+            @atomicStore(bool, &s.shared.stop, false, .monotonic);
             s.time_stop = false;
             s.force_thinking = false;
-            s.hash_history.clearRetainingCapacity();
-            s.hash_history.append(pos.hash) catch {};
+            s.hash_history.clear();
+            s.hash_history.append(pos.hash) catch unreachable;
             s.ttable.do_age();
         }
     }
@@ -291,7 +291,7 @@ pub const DatagenSingle = struct {
         var s = self.activeSearcher(pos.turn);
         s.time_stop = false;
         s.force_thinking = false;
-        @atomicStore(bool, &s.stop, false, .monotonic);
+        @atomicStore(bool, &s.shared.stop, false, .monotonic);
 
         const score: i32 = switch (pos.turn) {
             inline else => |turn| switch (self.config.raw_eval) {
@@ -300,7 +300,7 @@ pub const DatagenSingle = struct {
         };
         const white_score = if (pos.turn == types.Color.White) score else -score;
 
-        @atomicStore(bool, &s.stop, false, .monotonic);
+        @atomicStore(bool, &s.shared.stop, false, .monotonic);
         s.time_stop = false;
         s.force_thinking = false;
 
@@ -308,14 +308,6 @@ pub const DatagenSingle = struct {
             .score = white_score,
             .best_move = s.best_move,
         };
-    }
-
-    fn generateLegalMoves(pos: *position.Position, movelist: *std.array_list.Managed(types.Move)) void {
-        if (pos.turn == types.Color.White) {
-            pos.generate_legal_moves(types.Color.White, movelist);
-        } else {
-            pos.generate_legal_moves(types.Color.Black, movelist);
-        }
     }
 
     fn playMove(pos: *position.Position, move: types.Move) void {
@@ -389,24 +381,20 @@ pub const DatagenSingle = struct {
         var initial_board: ?viriformat.PackedBoard = null;
 
         while (true) : (ply += 1) {
-            var movelist = try std.array_list.Managed(types.Move).initCapacity(arena.allocator(), 32);
-            generateLegalMoves(&pos, &movelist);
+            const movelist = pos.legal_moves();
             const in_check = if (pos.turn == types.Color.White) pos.in_check(types.Color.White) else pos.in_check(types.Color.Black);
-            if (adjudicator.terminal(movelist.items.len, in_check, pos.turn, self.isCurrentPositionDraw(&pos))) |ended| {
+            if (adjudicator.terminal(movelist.len, in_check, pos.turn, self.isCurrentPositionDraw(&pos))) |ended| {
                 outcome = ended;
-                movelist.deinit();
                 break;
             }
 
             // Random opening moves
             if (ply < random_plies) {
-                const move = self.pickRandomOpeningMove(&pos, movelist.items);
+                const move = self.pickRandomOpeningMove(&pos, movelist.items());
                 playMove(&pos, move);
                 self.noteGamePosition(&pos);
-                movelist.deinit();
                 continue;
             }
-            movelist.deinit();
 
             // The first search after the random plies both screens the opening and plays the first recorded move.
             var opening_search: ?SearchResult = null;
@@ -497,23 +485,19 @@ pub const DatagenSingle = struct {
         const random_plies = self.randomPlyCount(using_book);
 
         while (true) : (ply += 1) {
-            var movelist = try std.array_list.Managed(types.Move).initCapacity(arena.allocator(), 32);
-            generateLegalMoves(&pos, &movelist);
+            const movelist = pos.legal_moves();
             const in_check = if (pos.turn == types.Color.White) pos.in_check(types.Color.White) else pos.in_check(types.Color.Black);
-            if (adjudicator.terminal(movelist.items.len, in_check, pos.turn, self.isCurrentPositionDraw(&pos))) |ended| {
+            if (adjudicator.terminal(movelist.len, in_check, pos.turn, self.isCurrentPositionDraw(&pos))) |ended| {
                 outcome = ended;
-                movelist.deinit();
                 break;
             }
 
             if (ply < random_plies) {
-                const move = self.pickRandomOpeningMove(&pos, movelist.items);
+                const move = self.pickRandomOpeningMove(&pos, movelist.items());
                 playMove(&pos, move);
                 self.noteGamePosition(&pos);
-                movelist.deinit();
                 continue;
             }
-            movelist.deinit();
 
             const result = self.searchPosition(&pos);
             const res = result.score;

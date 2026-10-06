@@ -8,18 +8,9 @@ const support = @import("support.zig");
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 
-fn play(pos: *position.Position, text: []const u8) !void {
-    const move = types.Move.new_from_string(pos, text);
-    try expect(move.to_u16() != 0);
-    switch (pos.turn) {
-        .White => pos.play_move(.White, move),
-        .Black => pos.play_move(.Black, move),
-    }
-}
-
-fn expect_same_evaluation(a: *const position.Position, b: *const position.Position) !void {
-    const acc_a = a.evaluator.nnue_evaluator.current();
-    const acc_b = b.evaluator.nnue_evaluator.current();
+fn expect_same_evaluation(a: *position.Position, b: *position.Position) !void {
+    const acc_a = a.evaluator.nnue_evaluator.accumulator(a);
+    const acc_b = b.evaluator.nnue_evaluator.accumulator(b);
     try expect(std.mem.eql(i16, &acc_a.white, &acc_b.white));
     try expect(std.mem.eql(i16, &acc_a.black, &acc_b.black));
     try expectEqual(a.evaluator.nnue_evaluator.evaluate(a.turn, a), b.evaluator.nnue_evaluator.evaluate(b.turn, b));
@@ -38,16 +29,6 @@ fn expect_matches_fresh(pos: *position.Position) !void {
     try expect_same_evaluation(fresh, pos);
 }
 
-fn legal_moves(pos: *position.Position, storage: *[256]types.Move) []types.Move {
-    var fba = std.heap.FixedBufferAllocator.init(std.mem.sliceAsBytes(storage));
-    var list = std.array_list.Managed(types.Move).initCapacity(fba.allocator(), storage.len) catch unreachable;
-    switch (pos.turn) {
-        .White => pos.generate_legal_moves(.White, &list),
-        .Black => pos.generate_legal_moves(.Black, &list),
-    }
-    return list.items;
-}
-
 const RootCase = struct { fen: []const u8, moves: []const []const u8 };
 
 // One helper adopts every root in turn, so each rebuild runs against a Finny
@@ -62,6 +43,16 @@ const root_cases = [_]RootCase{
     .{ .fen = types.DEFAULT_FEN, .moves = &.{"g1f3"} },
 };
 
+fn enter_root(s: *search.Searcher, pos: *position.Position, case: RootCase) !void {
+    pos.set_fen(case.fen);
+    s.hash_history.clear();
+    try s.hash_history.append(pos.hash);
+    for (case.moves) |move| {
+        _ = try support.play_uci(pos, move);
+        try s.hash_history.append(pos.hash);
+    }
+}
+
 test "smp root: adopted root evaluates like a fresh set_fen" {
     support.init_tables();
 
@@ -72,7 +63,7 @@ test "smp root: adopted root evaluates like a fresh set_fen" {
 
     for (root_cases) |case| {
         main.set_fen(case.fen);
-        for (case.moves) |move| try play(main, move);
+        for (case.moves) |move| _ = try support.play_uci(main, move);
 
         helper.copy_game_state(main);
         helper.rebuild_evaluation();
@@ -86,17 +77,11 @@ test "smp root: adopted root evaluates like a fresh set_fen" {
         try expect_matches_fresh(helper);
 
         // Moves from the adopted root update incrementally and unwind back to it.
-        var storage: [256]types.Move = undefined;
-        for (legal_moves(helper, &storage)) |move| {
-            switch (helper.turn) {
-                .White => helper.play_move(.White, move),
-                .Black => helper.play_move(.Black, move),
-            }
+        const helper_moves = helper.legal_moves();
+        for (helper_moves.items()) |move| {
+            support.play(helper, move);
             try expect_matches_fresh(helper);
-            switch (helper.turn) {
-                .White => helper.undo_move(.Black, move),
-                .Black => helper.undo_move(.White, move),
-            }
+            support.undo(helper, move);
         }
         try expectEqual(main.hash, helper.hash);
         try expect_same_evaluation(main, helper);
@@ -115,11 +100,11 @@ test "smp root: helper sees a repetition from before the root" {
     var helper = search.Searcher.new();
     defer helper.deinit();
     // Leftover history from an earlier, longer game must not survive.
-    try helper.hash_history.appendNTimes(pos.hash, 40);
+    for (0..40) |_| try helper.hash_history.append(pos.hash);
 
     try main.hash_history.append(pos.hash);
     for ([_][]const u8{ "g1f3", "g8f6", "f3g1" }) |move| {
-        try play(pos, move);
+        _ = try support.play_uci(pos, move);
         try main.hash_history.append(pos.hash);
     }
 
@@ -127,7 +112,7 @@ test "smp root: helper sees a repetition from before the root" {
     helper.root_board.rebuild_evaluation();
     try expect(!helper.is_draw(helper.root_board, false));
 
-    try play(pos, "f6g8");
+    _ = try support.play_uci(pos, "f6g8");
     try main.hash_history.append(pos.hash);
 
     helper.adopt_root(&main, pos);
@@ -158,32 +143,26 @@ test "smp root: multi-threaded search returns legal moves and helpers end on the
     // Consecutive searches from different roots, as in a game.
     for (root_cases) |case| {
         tt.GlobalTT.clear();
-        pos.set_fen(case.fen);
-        s.hash_history.clearRetainingCapacity();
-        try s.hash_history.append(pos.hash);
-        for (case.moves) |move| {
-            try play(pos, move);
-            try s.hash_history.append(pos.hash);
-        }
+        try enter_root(&s, pos, case);
         const root_hash = pos.hash;
 
-        s.stop = false;
+        s.shared.stop = false;
         switch (pos.turn) {
             .White => _ = s.iterative_deepening(pos, .White, 9),
             .Black => _ = s.iterative_deepening(pos, .Black, 9),
         }
 
         try expectEqual(root_hash, pos.hash);
-        var storage: [256]types.Move = undefined;
         var legal = false;
-        for (legal_moves(pos, &storage)) |move| {
+        const root_moves = pos.legal_moves();
+        for (root_moves.items()) |move| {
             if (move.to_u16() == s.best_move.to_u16()) legal = true;
         }
         try expect(legal);
 
         for (0..search.helper_count()) |i| {
             const h = search.helper_pool.worker(i).searcher;
-            helper_nodes += h.nodes;
+            helper_nodes += h.shared.nodes;
             try expectEqual(root_hash, h.root_board.hash);
             try expectEqual(s.hash_history.items.len, h.hash_history.items.len);
             try expectEqual(@as(u16, 0), h.root_board.evaluator.nnue_evaluator.depth);
@@ -191,4 +170,64 @@ test "smp root: multi-threaded search returns legal moves and helpers end on the
         }
     }
     try expect(helper_nodes > 0);
+}
+
+test "smp root: the node budget is compared with the nodes of every thread" {
+    if (comptime !platform.has_threads) return error.SkipZigTest;
+    platform.io = std.testing.io;
+    support.init_search();
+
+    search.set_helper_count(2);
+    defer search.set_helper_count(0);
+
+    var s = search.Searcher.new();
+    defer s.deinit();
+    s.force_thinking = true;
+
+    const budget: u64 = 50_000;
+    s.max_nodes = budget;
+    const helper = search.helper_pool.worker(1).searcher;
+    defer helper.shared.nodes = 0;
+
+    helper.shared.nodes = budget - 1;
+    try expect(!s.hard_limit_reached());
+    helper.shared.nodes = budget;
+    try expectEqual(budget, s.total_nodes());
+    try expect(s.hard_limit_reached());
+}
+
+test "smp root: a node budget ends a search that the main thread alone would continue" {
+    if (comptime !platform.has_threads) return error.SkipZigTest;
+    platform.io = std.testing.io;
+    support.init_search();
+    tt.GlobalTT.reset(16);
+
+    search.set_helper_count(3);
+    defer search.set_helper_count(0);
+
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
+    var s = search.Searcher.new();
+    defer s.deinit();
+    s.force_thinking = true;
+    s.silent_output = true;
+
+    const budget: u64 = 200_000;
+    s.max_nodes = budget;
+    s.soft_max_nodes = budget;
+    for (root_cases[1..3]) |case| {
+        tt.GlobalTT.clear();
+        try enter_root(&s, pos, case);
+        s.shared.stop = false;
+        switch (pos.turn) {
+            .White => _ = s.iterative_deepening(pos, .White, null),
+            .Black => _ = s.iterative_deepening(pos, .Black, null),
+        }
+
+        var helper_nodes: u64 = 0;
+        for (0..search.helper_count()) |i| helper_nodes += search.helper_pool.worker(i).searcher.shared.nodes;
+        try expectEqual(s.shared.nodes + helper_nodes, s.total_nodes());
+        try expect(s.total_nodes() >= budget);
+        try expect(s.shared.nodes < budget);
+    }
 }

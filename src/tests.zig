@@ -12,6 +12,7 @@ const perft = @import("chess/perft.zig");
 const see = @import("engine/see.zig");
 const search = @import("engine/search.zig");
 const tt = @import("engine/tt.zig");
+const support = @import("tests/support.zig");
 const expect = std.testing.expect;
 
 // The C tablebase code links against callbacks syzygy.zig exports. Reference
@@ -22,24 +23,32 @@ comptime {
 
 test {
     _ = @import("tests/frc.zig");
+    _ = @import("tests/board.zig");
     _ = @import("tests/search_features.zig");
     _ = @import("tests/correction_history.zig");
     _ = @import("engine/strength.zig");
     _ = @import("engine/uci/go.zig");
     _ = @import("tests/uci_options.zig");
     _ = @import("engine/numa.zig");
+    _ = @import("platform/large_memory.zig");
+    _ = @import("engine/tt.zig");
     _ = @import("tests/thread_pool.zig");
     _ = @import("tests/smp_root.zig");
+    _ = @import("tests/tt_concurrency.zig");
     _ = @import("engine/datagen/options.zig");
     _ = @import("engine/datagen/adjudicator.zig");
     _ = @import("tests/datagen.zig");
     _ = @import("chess/cuckoo.zig");
+    _ = @import("chess/key_history.zig");
     _ = @import("chess/fen.zig");
     _ = @import("tests/viriformat.zig");
     _ = @import("tests/tbfilter_viri.zig");
     _ = @import("engine/netscale.zig");
     _ = @import("tests/netscale.zig");
     _ = @import("tests/nnue_multi.zig");
+    _ = @import("tests/nnue_lazy.zig");
+    _ = @import("engine/nnue/eval_cache.zig");
+    _ = @import("tests/movepick.zig");
 }
 
 test "Basic Piece and Color" {
@@ -187,10 +196,9 @@ test "Position" {
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    // Position is ~174 KiB; keep it off the test stack.
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    // Position holds the whole undo stack; keep it off the test stack.
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
 
     try expect(pos.hash == 0);
     try expect(pos.turn == types.Color.White);
@@ -204,8 +212,6 @@ test "Position" {
     pos.remove_piece(types.Square.f3);
     try expect(pos.mailbox[types.Square.f3.index()] == types.Piece.NO_PIECE);
     try expect(pos.piece_bitboards[types.Piece.WHITE_KNIGHT.index()] == 0);
-
-    pos.init();
 
     pos.set_fen("rnbqkbnr/1ppp1pp1/p6p/4p3/8/1P3N2/PBPPPPPP/RN1QKB1R w KQkq -"[0..]);
     try expect(pos.attackers_from(types.Color.White, types.Square.e5, 0) == 0x200200);
@@ -222,7 +228,7 @@ test "Position" {
     try expect(!pos.in_check(types.Color.White));
 
     pos.set_fen(types.DEFAULT_FEN[0..]);
-    const score = hce.evaluate_comptime(pos, types.Color.White);
+    const output = support.network_output(pos);
 
     const m1 = types.Move.new_from_string(pos, "e2e4"[0..]);
     pos.play_move(types.Color.White, m1);
@@ -235,7 +241,7 @@ test "Position" {
     pos.undo_move(types.Color.Black, m2);
     pos.undo_move(types.Color.White, m1);
 
-    try expect(score == hce.evaluate_comptime(pos, types.Color.White));
+    try expect(output == support.network_output(pos));
 }
 
 // Move generation correctness (perft) + zobrist hashing
@@ -245,9 +251,8 @@ test "movegen: startpos perft 1-5" {
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
     pos.set_fen(types.DEFAULT_FEN[0..]);
 
     try expect(perft.perft(types.Color.White, pos, 1) == 20);
@@ -262,9 +267,8 @@ test "movegen: kiwipete perft 1-4" {
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
     pos.set_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -"[0..]);
 
     try expect(perft.perft(types.Color.White, pos, 1) == 48);
@@ -278,9 +282,8 @@ test "movegen: endgame perft suite position 3" {
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
     // Classic perft "position 3": rook + pawn endgame, rich in en-passant.
     pos.set_fen("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - -"[0..]);
 
@@ -296,9 +299,8 @@ test "movegen: en-passant position perft 1-4" {
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
     // Black just played c7-c5, so White has an immediate en-passant capture (d5xc6).
     pos.set_fen("rnbqkbnr/pp1ppppp/8/2pP4/8/8/PPP1PPPP/RNBQKBNR w KQkq c6"[0..]);
 
@@ -313,8 +315,8 @@ test "zobrist: make/unmake restores hash and board state" {
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
 
     const fens = [_][]const u8{
         types.DEFAULT_FEN[0..],
@@ -324,18 +326,16 @@ test "zobrist: make/unmake restores hash and board state" {
     };
 
     for (fens) |fen| {
-        pos.init();
         pos.set_fen(fen);
 
         const orig_hash = pos.hash;
         const orig_bitboards = pos.piece_bitboards;
         const orig_mailbox = pos.mailbox;
 
-        var list = std.array_list.Managed(types.Move).initCapacity(std.heap.c_allocator, 48) catch unreachable;
-        defer list.deinit();
+        var list: types.MoveList = .{};
         pos.generate_legal_moves(types.Color.White, &list);
 
-        for (list.items) |move| {
+        for (list.items()) |move| {
             pos.play_move(types.Color.White, move);
             pos.undo_move(types.Color.White, move);
 
@@ -358,9 +358,8 @@ test "zobrist: hash differs after a real move" {
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
     pos.set_fen(types.DEFAULT_FEN[0..]);
 
     const orig_hash = pos.hash;
@@ -376,8 +375,8 @@ test "zobrist: null-move hash symmetry" {
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
 
     const fens = [_][]const u8{
         // No en-passant square: null move only flips turn hash.
@@ -387,7 +386,6 @@ test "zobrist: null-move hash symmetry" {
     };
 
     for (fens) |fen| {
-        pos.init();
         pos.set_fen(fen);
 
         const orig_hash = pos.hash;
@@ -500,9 +498,8 @@ test "fen: starting position parse" {
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
 
     pos.set_fen(types.DEFAULT_FEN[0..]);
 
@@ -534,9 +531,8 @@ test "fen: black-to-move and partial castling rights" {
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
 
     // Black to move, only black kingside castling available ("k").
     pos.set_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b k -"[0..]);
@@ -554,12 +550,11 @@ test "fen: en-passant target square stored" {
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
 
     // Capturable en passant: a black pawn on d4 can answer e3, so the square is
     // recorded (and folded into the hash).
-    pos.init();
     pos.set_fen("rnbqkbnr/pppp1ppp/8/8/3pP3/8/PPPP1PPP/RNBQKBNR b KQkq e3"[0..]);
     try expect(pos.turn == types.Color.Black);
     try expect(pos.history[pos.game_ply].ep_sq == types.Square.e3);
@@ -570,7 +565,6 @@ test "fen: en-passant target square stored" {
     // Phantom en passant: after 1.e4 no black pawn can capture e3, so the FEN's
     // EP target is dropped (matches the FIDE/Zobrist definition of equality — the
     // position must not be distinguished from the same one with the EP right gone).
-    pos.init();
     pos.set_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3"[0..]);
     try expect(pos.turn == types.Color.Black);
     try expect(pos.history[pos.game_ply].ep_sq == types.Square.NO_SQUARE);
@@ -585,9 +579,8 @@ test "fen: basic_fen board round-trips" {
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -623,8 +616,7 @@ fn see_make_pos(fen: []const u8) *position.Position {
     tables.init_all();
     zobrist.init_zobrist();
     weights.do_nnue();
-    const pos = std.testing.allocator.create(position.Position) catch unreachable;
-    pos.init();
+    const pos = support.new_position() catch unreachable;
     pos.set_fen(fen);
     return pos;
 }
@@ -632,7 +624,7 @@ fn see_make_pos(fen: []const u8) *position.Position {
 test "see: free hanging knight capture is winning" {
     // White rook on e1 captures an undefended black knight on e5.
     const pos = see_make_pos("4k3/8/8/4n3/8/8/8/4R1K1 w - -");
-    defer std.testing.allocator.destroy(pos);
+    defer support.destroy_position(pos);
 
     const mv = types.Move.new_from_string(pos, "e1e5"[0..]);
     try expect(mv.is_capture()); // confirm it is generated as a capture
@@ -651,7 +643,7 @@ test "see: free hanging knight capture is winning" {
 test "see: queen captures pawn defended by pawn fails threshold 0" {
     // White queen e1 takes black pawn e5, defended by black pawn on d6.
     const pos = see_make_pos("4k3/8/3p4/4p3/8/8/8/4Q1K1 w - -");
-    defer std.testing.allocator.destroy(pos);
+    defer support.destroy_position(pos);
 
     const mv = types.Move.new_from_string(pos, "e1e5"[0..]);
     try expect(mv.is_capture());
@@ -667,7 +659,7 @@ test "see: queen captures pawn defended by pawn fails threshold 0" {
 test "see: equal rook trade" {
     // White rook e1 takes black rook e5, which is defended by black rook e8.
     const pos = see_make_pos("4r2k/8/8/4r3/8/8/8/4R1K1 w - -");
-    defer std.testing.allocator.destroy(pos);
+    defer support.destroy_position(pos);
 
     const mv = types.Move.new_from_string(pos, "e1e5"[0..]);
     try expect(mv.is_capture());
@@ -682,7 +674,7 @@ test "see: equal rook trade" {
 test "see: rook captures undefended queen is strongly winning" {
     // White rook e1 takes an undefended black queen on e5.
     const pos = see_make_pos("4k3/8/8/4q3/8/8/8/4R1K1 w - -");
-    defer std.testing.allocator.destroy(pos);
+    defer support.destroy_position(pos);
 
     const mv = types.Move.new_from_string(pos, "e1e5"[0..]);
     try expect(mv.is_capture());
@@ -696,7 +688,7 @@ test "see: rook captures undefended queen is strongly winning" {
 test "see: bishop captures pawn defended by pawn is losing" {
     // White bishop c3 takes black pawn e5, defended by black pawn d6.
     const pos = see_make_pos("4k3/8/3p4/4p3/8/2B5/8/6K1 w - -");
-    defer std.testing.allocator.destroy(pos);
+    defer support.destroy_position(pos);
 
     const mv = types.Move.new_from_string(pos, "c3e5"[0..]);
     try expect(mv.is_capture());
@@ -711,7 +703,7 @@ test "see: bishop captures pawn defended by pawn is losing" {
 test "see: pawn captures undefended pawn is winning" {
     // White pawn d4 takes an undefended black pawn on e5.
     const pos = see_make_pos("4k3/8/8/4p3/3P4/8/8/6K1 w - -");
-    defer std.testing.allocator.destroy(pos);
+    defer support.destroy_position(pos);
 
     const mv = types.Move.new_from_string(pos, "d4e5"[0..]);
     try expect(mv.is_capture());
@@ -756,7 +748,7 @@ test "eval: nnue weights load and dimensions" {
 }
 
 fn evaluate_nnue_scalar(pos: *position.Position, comptime turn: types.Color) i32 {
-    const accumulator = pos.evaluator.nnue_evaluator.current();
+    const accumulator = pos.evaluator.nnue_evaluator.accumulator(pos);
     const pieces = types.popcount_usize(pos.all_all_pieces());
     const bucket = @min((pieces -| 2) / 4, weights.OUTPUT_SIZE - 1);
     const own = if (turn == types.Color.White) &accumulator.white else &accumulator.black;
@@ -780,9 +772,8 @@ test "eval: SIMD inference matches the scalar head" {
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
 
     const fens = [_][]const u8{
         types.DEFAULT_FEN,
@@ -817,18 +808,17 @@ test "eval: determinism same position twice" {
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
 
     pos.set_fen("r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq -"[0..]);
-    const a = hce.evaluate_comptime(pos, types.Color.White);
-    const b = hce.evaluate_comptime(pos, types.Color.White);
-    try expect(a == b);
+    const recomputed = support.network_output(pos);
+    try expect(recomputed == support.network_output(pos));
 
-    const c = hce.evaluate_nnue_comptime(pos, types.Color.White);
-    const d = hce.evaluate_nnue_comptime(pos, types.Color.White);
-    try expect(c == d);
+    const stored = hce.evaluate_nnue_comptime(pos, types.Color.White);
+    const cached = hce.evaluate_nnue_comptime(pos, types.Color.White);
+    try expect(stored == cached);
+    try expect(cached == pos.evaluator.nnue_evaluator.evaluate_uncached(types.Color.White, pos));
 }
 
 test "eval: nnue incremental equals fresh refresh (startpos)" {
@@ -836,17 +826,16 @@ test "eval: nnue incremental equals fresh refresh (startpos)" {
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
     pos.set_fen(types.DEFAULT_FEN[0..]);
 
     // set_fen forced a full_refresh; this is the reference value.
-    const fresh0 = hce.evaluate_nnue_comptime(pos, types.Color.White);
+    const fresh0 = pos.evaluator.nnue_evaluator.evaluate_uncached(types.Color.White, pos);
 
     // Force another full refresh from the same board: must be identical.
     pos.evaluator.full_refresh(pos);
-    const fresh1 = hce.evaluate_nnue_comptime(pos, types.Color.White);
+    const fresh1 = pos.evaluator.nnue_evaluator.evaluate_uncached(types.Color.White, pos);
     try expect(fresh0 == fresh1);
 }
 
@@ -855,9 +844,8 @@ test "eval: nnue incremental equals fresh refresh after moves" {
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
     pos.set_fen(types.DEFAULT_FEN[0..]);
 
     const m1 = types.Move.new_from_string(pos, "e2e4"[0..]);
@@ -870,37 +858,17 @@ test "eval: nnue incremental equals fresh refresh after moves" {
     pos.play_move(types.Color.Black, m4);
 
     // Incremental accumulator value (built via play_move toggles).
-    const incremental_w = hce.evaluate_nnue_comptime(pos, types.Color.White);
-    const incremental_b = hce.evaluate_nnue_comptime(pos, types.Color.Black);
+    const incremental_w = pos.evaluator.nnue_evaluator.evaluate_uncached(types.Color.White, pos);
+    const incremental_b = pos.evaluator.nnue_evaluator.evaluate_uncached(types.Color.Black, pos);
 
     // Rebuild the accumulator from scratch off the current mailbox; the
     // incrementally-updated SIMD accumulator must match a fresh refresh.
     pos.evaluator.full_refresh(pos);
-    const fresh_w = hce.evaluate_nnue_comptime(pos, types.Color.White);
-    const fresh_b = hce.evaluate_nnue_comptime(pos, types.Color.Black);
+    const fresh_w = pos.evaluator.nnue_evaluator.evaluate_uncached(types.Color.White, pos);
+    const fresh_b = pos.evaluator.nnue_evaluator.evaluate_uncached(types.Color.Black, pos);
 
     try expect(incremental_w == fresh_w);
     try expect(incremental_b == fresh_b);
-}
-
-fn expect_nnue_matches_fresh(pos: *position.Position) !void {
-    // Build the reference with a brand-new NNUE/Finny cache. Refreshing `pos`
-    // itself would mutate the cache under test and could hide revisit bugs.
-    const reference = try std.testing.allocator.create(position.Position);
-    defer {
-        reference.deinit();
-        std.testing.allocator.destroy(reference);
-    }
-    reference.init();
-    reference.piece_bitboards = pos.piece_bitboards;
-    reference.mailbox = pos.mailbox;
-    reference.turn = pos.turn;
-    reference.evaluator.full_refresh(reference);
-
-    const actual = pos.evaluator.nnue_evaluator.current();
-    const expected = reference.evaluator.nnue_evaluator.current();
-    try std.testing.expectEqualSlices(i16, expected.white[0..], actual.white[0..]);
-    try std.testing.expectEqualSlices(i16, expected.black[0..], actual.black[0..]);
 }
 
 test "eval: nnue king mirror crossing matches fresh (white e1d1)" {
@@ -908,17 +876,16 @@ test "eval: nnue king mirror crossing matches fresh (white e1d1)" {
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
     pos.set_fen("4k3/8/8/8/8/8/8/4K3 w - -"[0..]);
 
     const mv = types.Move.new_from_string(pos, "e1d1"[0..]);
     pos.play_move(types.Color.White, mv);
-    try expect_nnue_matches_fresh(pos);
+    try support.expect_nnue_matches_fresh(pos);
 
     pos.undo_move(types.Color.White, mv);
-    try expect_nnue_matches_fresh(pos);
+    try support.expect_nnue_matches_fresh(pos);
 }
 
 test "eval: nnue king mirror crossing matches fresh (black e8d8)" {
@@ -926,17 +893,16 @@ test "eval: nnue king mirror crossing matches fresh (black e8d8)" {
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
     pos.set_fen("4k3/8/8/8/8/8/8/4K3 b - -"[0..]);
 
     const mv = types.Move.new_from_string(pos, "e8d8"[0..]);
     pos.play_move(types.Color.Black, mv);
-    try expect_nnue_matches_fresh(pos);
+    try support.expect_nnue_matches_fresh(pos);
 
     pos.undo_move(types.Color.Black, mv);
-    try expect_nnue_matches_fresh(pos);
+    try support.expect_nnue_matches_fresh(pos);
 }
 
 test "eval: nnue white castling OO matches fresh (bucket change)" {
@@ -944,17 +910,16 @@ test "eval: nnue white castling OO matches fresh (bucket change)" {
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
     pos.set_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq -"[0..]);
 
     const mv = types.Move.new_from_string(pos, "e1g1"[0..]);
     pos.play_move(types.Color.White, mv);
-    try expect_nnue_matches_fresh(pos);
+    try support.expect_nnue_matches_fresh(pos);
 
     pos.undo_move(types.Color.White, mv);
-    try expect_nnue_matches_fresh(pos);
+    try support.expect_nnue_matches_fresh(pos);
 }
 
 test "eval: nnue black castling OOO matches fresh" {
@@ -962,17 +927,16 @@ test "eval: nnue black castling OOO matches fresh" {
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
     pos.set_fen("r3k2r/8/8/8/8/8/8/R3K2R b KQkq -"[0..]);
 
     const mv = types.Move.new_from_string(pos, "e8c8"[0..]);
     pos.play_move(types.Color.Black, mv);
-    try expect_nnue_matches_fresh(pos);
+    try support.expect_nnue_matches_fresh(pos);
 
     pos.undo_move(types.Color.Black, mv);
-    try expect_nnue_matches_fresh(pos);
+    try support.expect_nnue_matches_fresh(pos);
 }
 
 test "eval: nnue king capture into another bucket, then further moves, matches fresh" {
@@ -980,29 +944,28 @@ test "eval: nnue king capture into another bucket, then further moves, matches f
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
     pos.set_fen("4k3/8/8/8/8/8/3p3P/4K3 w - -"[0..]);
 
     const capture = types.Move.new_from_string(pos, "e1d2"[0..]);
     pos.play_move(types.Color.White, capture);
-    try expect_nnue_matches_fresh(pos);
+    try support.expect_nnue_matches_fresh(pos);
 
     // The move after a king move updates both perspectives again.
     const reply = types.Move.new_from_string(pos, "e8e7"[0..]);
     pos.play_move(types.Color.Black, reply);
-    try expect_nnue_matches_fresh(pos);
+    try support.expect_nnue_matches_fresh(pos);
 
     const push = types.Move.new_from_string(pos, "h2h4"[0..]);
     pos.play_move(types.Color.White, push);
-    try expect_nnue_matches_fresh(pos);
+    try support.expect_nnue_matches_fresh(pos);
 
     pos.undo_move(types.Color.White, push);
     pos.undo_move(types.Color.Black, reply);
-    try expect_nnue_matches_fresh(pos);
+    try support.expect_nnue_matches_fresh(pos);
     pos.undo_move(types.Color.White, capture);
-    try expect_nnue_matches_fresh(pos);
+    try support.expect_nnue_matches_fresh(pos);
 }
 
 test "eval: nnue finny revisit after leaving and returning to bucket" {
@@ -1010,29 +973,28 @@ test "eval: nnue finny revisit after leaving and returning to bucket" {
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
     pos.set_fen("4k3/8/8/8/8/8/8/4K3 w - -"[0..]);
 
     const m1 = types.Move.new_from_string(pos, "e1d1"[0..]);
     pos.play_move(types.Color.White, m1);
-    try expect_nnue_matches_fresh(pos);
+    try support.expect_nnue_matches_fresh(pos);
 
     const m2 = types.Move.new_from_string(pos, "e8f8"[0..]);
     pos.play_move(types.Color.Black, m2);
-    try expect_nnue_matches_fresh(pos);
+    try support.expect_nnue_matches_fresh(pos);
 
     const m3 = types.Move.new_from_string(pos, "d1e1"[0..]);
     pos.play_move(types.Color.White, m3);
-    try expect_nnue_matches_fresh(pos);
+    try support.expect_nnue_matches_fresh(pos);
 
     pos.undo_move(types.Color.White, m3);
-    try expect_nnue_matches_fresh(pos);
+    try support.expect_nnue_matches_fresh(pos);
     pos.undo_move(types.Color.Black, m2);
-    try expect_nnue_matches_fresh(pos);
+    try support.expect_nnue_matches_fresh(pos);
     pos.undo_move(types.Color.White, m1);
-    try expect_nnue_matches_fresh(pos);
+    try support.expect_nnue_matches_fresh(pos);
 }
 
 test "eval: nnue incremental equals fresh after a capture" {
@@ -1040,9 +1002,8 @@ test "eval: nnue incremental equals fresh after a capture" {
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
     pos.set_fen(types.DEFAULT_FEN[0..]);
 
     const m1 = types.Move.new_from_string(pos, "e2e4"[0..]);
@@ -1052,9 +1013,9 @@ test "eval: nnue incremental equals fresh after a capture" {
     const m3 = types.Move.new_from_string(pos, "e4d5"[0..]); // capture
     pos.play_move(types.Color.White, m3);
 
-    const incremental = hce.evaluate_nnue_comptime(pos, types.Color.Black);
+    const incremental = pos.evaluator.nnue_evaluator.evaluate_uncached(types.Color.Black, pos);
     pos.evaluator.full_refresh(pos);
-    const fresh = hce.evaluate_nnue_comptime(pos, types.Color.Black);
+    const fresh = pos.evaluator.nnue_evaluator.evaluate_uncached(types.Color.Black, pos);
     try expect(incremental == fresh);
 }
 
@@ -1063,9 +1024,8 @@ test "eval: hce material draw classification" {
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
 
     // KvK -> hard draw and drawish
     pos.set_fen("4k3/8/8/8/8/8/8/4K3 w - -"[0..]);
@@ -1114,16 +1074,15 @@ test "search: mate in 1 (white back-rank)" {
     search.NUM_THREADS = 0;
     tt.GlobalTT.clear();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
     pos.set_fen("6k1/5ppp/8/8/8/8/8/R6K w - -"[0..]);
 
     var s = search.Searcher.new();
     defer s.deinit();
     s.force_thinking = true;
     s.silent_output = true;
-    s.stop = false;
+    s.shared.stop = false;
     s.reset_heuristics(true);
 
     const score = s.iterative_deepening(pos, types.Color.White, 4);
@@ -1149,16 +1108,15 @@ test "search: mate in 1 (black back-rank)" {
     search.NUM_THREADS = 0;
     tt.GlobalTT.clear();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
     pos.set_fen("r6k/8/8/8/8/8/5PPP/6K1 b - -"[0..]);
 
     var s = search.Searcher.new();
     defer s.deinit();
     s.force_thinking = true;
     s.silent_output = true;
-    s.stop = false;
+    s.shared.stop = false;
     s.reset_heuristics(true);
 
     const score = s.iterative_deepening(pos, types.Color.Black, 4);
@@ -1183,9 +1141,8 @@ test "search: forced node-limited search continues after reporting mate" {
     search.NUM_THREADS = 0;
     tt.GlobalTT.clear();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
     pos.set_fen("2r3k1/p4p2/3Rp2p/1p2P1pK/8/1P4P1/P3Q2P/1q6 b - - 0 1"[0..]);
 
     var s = search.Searcher.new();
@@ -1196,7 +1153,7 @@ test "search: forced node-limited search continues after reporting mate" {
     // run out of depth. Search policy is deliberately independent of output.
     s.silent_output = true;
     s.max_nodes = 30_000;
-    s.stop = false;
+    s.shared.stop = false;
     s.reset_heuristics(true);
 
     const score = s.iterative_deepening(pos, types.Color.Black, null);
@@ -1220,9 +1177,8 @@ test "search: stalemate scores as draw" {
     search.NUM_THREADS = 0;
     tt.GlobalTT.clear();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
     // Black to move: Kh8 has no legal move and is not in check -> stalemate.
     pos.set_fen("7k/5Q2/6K1/8/8/8/8/8 b - -"[0..]);
 
@@ -1230,11 +1186,27 @@ test "search: stalemate scores as draw" {
     defer s.deinit();
     s.force_thinking = true;
     s.silent_output = true;
-    s.stop = false;
+    s.shared.stop = false;
     s.reset_heuristics(true);
 
     const score = s.iterative_deepening(pos, types.Color.Black, 4);
     try expect(score == 0);
+}
+
+const SearchOutcome = struct { score: i32, nodes: u64 };
+
+/// A new searcher and a cleared transposition table; the evaluation cache of `pos` is kept.
+fn search_start_position(pos: *position.Position) SearchOutcome {
+    pos.set_fen(types.DEFAULT_FEN[0..]);
+    tt.GlobalTT.clear();
+    var searcher = search.Searcher.new();
+    defer searcher.deinit();
+    searcher.force_thinking = true;
+    searcher.silent_output = true;
+    searcher.shared.stop = false;
+    searcher.reset_heuristics(true);
+    const score = searcher.iterative_deepening(pos, types.Color.White, 7);
+    return .{ .score = score, .nodes = searcher.shared.nodes };
 }
 
 test "search: deterministic node counts and score" {
@@ -1249,38 +1221,18 @@ test "search: deterministic node counts and score" {
     tt.GlobalTT.reset(16);
     search.NUM_THREADS = 0; // single-threaded: no helper search threads -> deterministic
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
+    const other = try support.new_position();
+    defer support.destroy_position(other);
 
-    // Run 1
-    pos.init();
-    pos.set_fen(types.DEFAULT_FEN[0..]);
-    tt.GlobalTT.clear();
-    var s1 = search.Searcher.new();
-    defer s1.deinit();
-    s1.force_thinking = true;
-    s1.silent_output = true;
-    s1.stop = false;
-    s1.reset_heuristics(true);
-    const score1 = s1.iterative_deepening(pos, types.Color.White, 7);
-    const nodes1 = s1.nodes;
+    const cold = search_start_position(pos);
+    const cold_again = search_start_position(other);
+    const warm = search_start_position(pos);
 
-    // Run 2: fresh searcher, cleared TT + heuristics, identical starting position
-    pos.init();
-    pos.set_fen(types.DEFAULT_FEN[0..]);
-    tt.GlobalTT.clear();
-    var s2 = search.Searcher.new();
-    defer s2.deinit();
-    s2.force_thinking = true;
-    s2.silent_output = true;
-    s2.stop = false;
-    s2.reset_heuristics(true);
-    const score2 = s2.iterative_deepening(pos, types.Color.White, 7);
-    const nodes2 = s2.nodes;
-
-    try expect(score1 == score2);
-    try expect(nodes1 == nodes2);
-    try expect(nodes1 > 0);
+    try expect(cold.nodes > 0);
+    try std.testing.expectEqual(cold, cold_again);
+    try std.testing.expectEqual(cold, warm);
 }
 
 test "zobrist: castling rights are part of the position key" {
@@ -1288,10 +1240,9 @@ test "zobrist: castling rights are part of the position key" {
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
 
-    pos.init();
     pos.set_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
     const with_rights = pos.hash;
 
@@ -1304,9 +1255,8 @@ test "fen: halfmove clock is preserved" {
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
     pos.set_fen("7k/8/8/8/8/8/8/KR6 w - - 99 1");
     try expect(pos.history[pos.game_ply].fifty == 99);
 }
@@ -1316,9 +1266,8 @@ test "fen: start_ply follows fullmove and side to move" {
     zobrist.init_zobrist();
     weights.do_nnue();
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
 
     pos.set_fen("8/5k2/8/8/3P4/8/5K2/8 w - - 0 1");
     try expect(pos.start_ply == 0);
@@ -1335,7 +1284,7 @@ test "fen: start_ply follows fullmove and side to move" {
 
 test "see: absolutely pinned pawn cannot recapture" {
     const pos = see_make_pos("4k3/4p3/3p4/8/8/8/7Q/4R1K1 w - -");
-    defer std.testing.allocator.destroy(pos);
+    defer support.destroy_position(pos);
 
     const mv = types.Move.new_from_string(pos, "h2d6");
     try expect(mv.is_capture());
@@ -1355,16 +1304,14 @@ test "search: maximum-mobility position exceeds 128 quiet moves safely" {
     tt.GlobalTT.clear();
     search.NUM_THREADS = 0;
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
     pos.set_fen("R6R/3Q4/1Q4Q1/4Q3/2Q4Q/Q4Q2/pp1Q4/kBNN1KB1 w - - 0 1");
 
-    var moves = std.array_list.Managed(types.Move).initCapacity(std.testing.allocator, 256) catch unreachable;
-    defer moves.deinit();
+    var moves: types.MoveList = .{};
     pos.generate_legal_moves(types.Color.White, &moves);
     var quiets: usize = 0;
-    for (moves.items) |move| {
+    for (moves.items()) |move| {
         if (!move.is_capture()) quiets += 1;
     }
     try expect(quiets > 128);
@@ -1394,9 +1341,8 @@ test "qsearch: checkmate takes precedence over fifty-move draw" {
     tt.GlobalTT.clear();
     search.NUM_THREADS = 0;
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
     pos.set_fen("7k/6Q1/6K1/8/8/8/8/8 b - - 100 1");
 
     var s = search.Searcher.new();
@@ -1425,9 +1371,8 @@ test "qsearch: stalemate precedes stand-pat and TT cutoffs" {
     tt.GlobalTT.clear();
     search.NUM_THREADS = 0;
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
     pos.set_fen("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1");
 
     tt.GlobalTT.set(pos.hash, tt.Item{
@@ -1472,9 +1417,8 @@ test "qsearch: contempt draw keeps fail-soft provenance" {
     tt.GlobalTT.clear();
     search.NUM_THREADS = 0;
 
-    const pos = try std.testing.allocator.create(position.Position);
-    defer std.testing.allocator.destroy(pos);
-    pos.init();
+    const pos = try support.new_position();
+    defer support.destroy_position(pos);
     // Bxc6+ removes Black's last non-king piece, reaching the known KBvK draw.
     pos.set_fen("4k3/8/2q5/1B6/8/8/8/4K3 w - - 0 1");
 

@@ -46,11 +46,11 @@ pub const UciInterface = struct {
                 self.search_thread = null;
             }
         }
-        @atomicStore(bool, &self.searcher.is_searching, false, .release);
+        @atomicStore(bool, &self.searcher.shared.is_searching, false, .release);
     }
 
     fn stop_search(self: *UciInterface) void {
-        @atomicStore(bool, &self.searcher.stop, true, .monotonic);
+        @atomicStore(bool, &self.searcher.shared.stop, true, .monotonic);
         self.join_search();
     }
 
@@ -102,7 +102,7 @@ pub const UciInterface = struct {
             return true;
         }
 
-        if (@atomicLoad(bool, &self.searcher.is_searching, .acquire)) {
+        if (@atomicLoad(bool, &self.searcher.shared.is_searching, .acquire)) {
             try out.print("info string ignored while searching: {s}" ++ nl, .{std.mem.trim(u8, line, "\r\n")});
             return true;
         }
@@ -133,6 +133,7 @@ pub const UciInterface = struct {
             try self.print_evaluation(out);
         } else if (eql(command, "perft") or eql(command, "perftdiv")) {
             const depth = @max(std.fmt.parseUnsigned(u32, tokens.next() orelse "1", 10) catch 1, 1);
+            self.position.evaluator.nnue_evaluator.reset_depth(&self.position);
             if (eql(command, "perft")) {
                 perft.perft_test(&self.position, depth);
             } else switch (self.position.turn) {
@@ -192,8 +193,8 @@ pub const UciInterface = struct {
             return;
         }
 
-        self.searcher.hash_history.clearRetainingCapacity();
-        self.searcher.hash_history.append(self.position.hash) catch {};
+        self.searcher.hash_history.clear();
+        self.searcher.hash_history.append(self.position.hash) catch unreachable;
 
         if (!eql(tokens.next() orelse return, "moves")) return;
         while (tokens.next()) |tok| {
@@ -204,7 +205,7 @@ pub const UciInterface = struct {
                 .White => self.position.play_move(.White, move),
                 .Black => self.position.play_move(.Black, move),
             }
-            self.searcher.hash_history.append(self.position.hash) catch {};
+            self.searcher.hash_history.append(self.position.hash) catch unreachable;
         }
     }
 
@@ -228,15 +229,15 @@ pub const UciInterface = struct {
         s.strength = self.settings.playing_strength();
         s.search_move_count = cmd.search_move_count;
         @memcpy(s.search_moves[0..cmd.search_move_count], cmd.search_moves[0..cmd.search_move_count]);
-        @atomicStore(bool, &s.pondering, cmd.ponder, .release);
+        @atomicStore(bool, &s.shared.pondering, cmd.ponder, .release);
 
         const instant_single_reply = budget.managed and !cmd.ponder and !cmd.infinite;
         numa.init();
 
-        @atomicStore(bool, &s.stop, false, .monotonic);
+        @atomicStore(bool, &s.shared.stop, false, .monotonic);
         // Mark searching BEFORE spawning so a second `go` arriving before the
         // worker starts cannot pass the is_searching guard and double-spawn.
-        @atomicStore(bool, &s.is_searching, true, .release);
+        @atomicStore(bool, &s.shared.is_searching, true, .release);
 
         if (comptime platform.has_threads) {
             self.search_thread = std.Thread.spawn(
@@ -273,14 +274,7 @@ fn run_search(searcher: *search.Searcher, pos: *position.Position, max_depth: ?u
 }
 
 fn legal_move_count(pos: *position.Position) usize {
-    var storage: [search.MAX_MOVES]types.Move = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(std.mem.sliceAsBytes(&storage));
-    var moves = std.array_list.Managed(types.Move).initCapacity(fba.allocator(), storage.len) catch unreachable;
-    switch (pos.turn) {
-        .White => pos.generate_legal_moves(.White, &moves),
-        .Black => pos.generate_legal_moves(.Black, &moves),
-    }
-    return moves.items.len;
+    return pos.legal_moves().len;
 }
 
 inline fn eql(a: []const u8, b: []const u8) bool {

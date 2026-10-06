@@ -100,10 +100,10 @@ pub fn bench() !void {
     pos.init();
     for (FENS) |fen| {
         pos.set_fen(fen);
-        @atomicStore(bool, &searcher.stop, false, .monotonic);
+        @atomicStore(bool, &searcher.shared.stop, false, .monotonic);
         searcher.reset_heuristics(true);
-        searcher.hash_history.clearRetainingCapacity();
-        searcher.hash_history.append(pos.hash) catch {};
+        searcher.hash_history.clear();
+        searcher.hash_history.append(pos.hash) catch unreachable;
         const job = BenchJob{ .searcher = searcher, .pos = pos, .depth = depth };
         if (comptime platform.has_threads) {
             const thread = std.Thread.spawn(.{ .stack_size = 256 * 1024 * 1024 }, runBenchSearch, .{job}) catch unreachable;
@@ -111,7 +111,7 @@ pub fn bench() !void {
         } else {
             runBenchSearch(job);
         }
-        nodes += searcher.nodes;
+        nodes += searcher.shared.nodes;
     }
 
     try stdout.print("{} nodes {} nps\n", .{ nodes, nodes * std.time.ns_per_s / timer.read() });

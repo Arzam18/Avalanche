@@ -3,6 +3,7 @@ const platform = @import("../platform.zig");
 const types = @import("../chess/types.zig");
 const position = @import("../chess/position.zig");
 const support = @import("support.zig");
+const hce = @import("../engine/hce.zig");
 const search = @import("../engine/search.zig");
 const strength = @import("../engine/strength.zig");
 const tt = @import("../engine/tt.zig");
@@ -39,8 +40,8 @@ const Fixture = struct {
 
     fn run(self: *Fixture, max_depth: ?u8) void {
         tt.GlobalTT.clear();
-        self.searcher.stop = false;
-        self.searcher.hash_history.clearRetainingCapacity();
+        self.searcher.shared.stop = false;
+        self.searcher.hash_history.clear();
         self.searcher.hash_history.append(self.pos.hash) catch unreachable;
         switch (self.pos.turn) {
             .White => _ = self.searcher.iterative_deepening(self.pos, .White, max_depth),
@@ -64,6 +65,24 @@ fn expect_consistent_lines(searcher: *const search.Searcher) !void {
             try expect(earlier.pv[0].to_u16() != line.pv[0].to_u16());
         }
     }
+}
+
+test "move list: a set-up position with more moves than a list holds is cut at the capacity and searched" {
+    var fixture: Fixture = undefined;
+    try fixture.init("QQQQQQQQ/Q6Q/Q6Q/Q6Q/Q6Q/Q1k4Q/Q6Q/KQQQQQQQ w - - 0 1");
+    defer fixture.deinit();
+    try expectEqual(@as(usize, types.MoveList.capacity), fixture.pos.legal_moves().len);
+
+    fixture.pos.set_fen("knQQQQQQ/pp5Q/Q6Q/Q6Q/Q6Q/Q6Q/Q6Q/KQQQQQQQ w - - 0 1");
+    const moves = fixture.pos.legal_moves();
+    try expectEqual(@as(usize, types.MoveList.capacity), moves.len);
+
+    fixture.run(3);
+    var best_is_listed = false;
+    for (moves.items()) |move| {
+        if (move.to_u16() == fixture.searcher.best_move.to_u16()) best_is_listed = true;
+    }
+    try expect(best_is_listed);
 }
 
 test "multipv: completed search reports distinct lines sorted by score" {
@@ -135,4 +154,41 @@ test "strength: a limited engine searches shallowly but plays a legal candidate"
         found = found or line.pv[0].to_u16() == f.searcher.best_move.to_u16();
     }
     try expect(found);
+}
+
+const DrawnScores = struct { quiescence: i32, negamax: i32 };
+
+fn scores_of_drawn_position(fen: []const u8) !DrawnScores {
+    var fixture: Fixture = undefined;
+    try fixture.init(fen);
+    defer fixture.deinit();
+    tt.GlobalTT.clear();
+    try fixture.searcher.hash_history.append(fixture.pos.hash);
+
+    const searcher = fixture.searcher;
+    const pos = fixture.pos;
+    return switch (pos.turn) {
+        inline else => |color| .{
+            .quiescence = searcher.quiescence_search(pos, color, .scaled, -hce.MateScore, hce.MateScore),
+            .negamax = searcher.negamax(pos, color, .scaled, 1, -hce.MateScore, hce.MateScore, false, .PV, false),
+        },
+    };
+}
+
+test "search: after a hundred plies without progress a side in check is mated if it has no move and drawn if it has one" {
+    const old_contempt = search.CONTEMPT;
+    defer search.CONTEMPT = old_contempt;
+    search.CONTEMPT = 100;
+
+    const mated = try scores_of_drawn_position("7k/6Q1/6K1/8/8/8/8/8 b - - 100 1");
+    try expectEqual(-hce.MateScore, mated.quiescence);
+    try expectEqual(-hce.MateScore, mated.negamax);
+
+    const drawn_in_check = try scores_of_drawn_position("7k/8/6K1/8/8/8/8/7R b - - 100 1");
+    try expectEqual(-search.CONTEMPT, drawn_in_check.quiescence);
+    try expectEqual(-search.CONTEMPT, drawn_in_check.negamax);
+
+    const drawn = try scores_of_drawn_position("7k/8/6K1/8/8/8/8/6R1 b - - 100 1");
+    try expectEqual(-search.CONTEMPT, drawn.quiescence);
+    try expectEqual(-search.CONTEMPT, drawn.negamax);
 }

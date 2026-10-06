@@ -170,7 +170,7 @@ fn set_hash(ctx: Context, value: Value) !void {
     if (installed_mb < requested) {
         try ctx.out.print("info string Hash: failed to allocate {} MB, still using {} MB" ++ search.line_ending, .{ requested, installed_mb });
     }
-    try ctx.out.print("info string Hash: {} MB, {} MB on huge pages" ++ search.line_ending, .{ installed_mb, tt.GlobalTT.huge_page_bytes / tt.MB });
+    try ctx.out.print("info string Hash: {} MB, {} MB on huge pages" ++ search.line_ending, .{ installed_mb, tt.GlobalTT.huge_page_bytes() / tt.MB });
 }
 
 fn set_threads(ctx: Context, value: Value) !void {
@@ -260,7 +260,6 @@ fn set_eval_file(ctx: Context, value: Value) !void {
         return;
     };
     ctx.position.refresh_evaluation();
-    search.discard_helper_evaluation_caches();
     // Stored static evals were computed by the previous network.
     tt.GlobalTT.clear();
     try ctx.out.print("info string EvalFile: using {s}" ++ search.line_ending, .{weights.active_network()});

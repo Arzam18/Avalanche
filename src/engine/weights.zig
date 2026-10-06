@@ -1,7 +1,7 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const build_options = @import("build_options");
 const platform = @import("../platform.zig");
+const large_memory = platform.large_memory;
 
 const NNUE_SOURCE = @embedFile("nnue");
 
@@ -107,14 +107,26 @@ pub const head = switch (HEAD) {
 
 pub const NNUEWeights = Network(HEAD);
 
-const MODEL_ALIGN = if (builtin.target.os.tag == .linux) 2 * 1024 * 1024 else std.atomic.cache_line;
-var model_storage: NNUEWeights align(MODEL_ALIGN) = undefined;
+/// The embedded network, aligned for inference: the only copy of it in the
+/// executable. Wasm runs on it in place to avoid a second 25 MB in linear memory.
+const embedded_model align(@alignOf(NNUEWeights)) = NNUE_SOURCE.*;
+const embedded_bytes: *align(@alignOf(NNUEWeights)) const [@sizeOf(NNUEWeights)]u8 = embedded_model[0..@sizeOf(NNUEWeights)];
 
-// Read in place on wasm to avoid a second 25 MB copy in linear memory. It must
-// be a var: through a const, every MODEL access would be folded at comptime.
-var embedded_model: [@sizeOf(NNUEWeights)]u8 align(@alignOf(NNUEWeights)) = NNUE_SOURCE[0..@sizeOf(NNUEWeights)].*;
+/// The network in use: the embedded image until `adopt` has copied a network
+/// into large memory (docs/MEMORY.md).
+pub var MODEL: *const NNUEWeights = @ptrCast(embedded_bytes);
 
-pub const MODEL: *const NNUEWeights = if (platform.is_wasm) @ptrCast(&embedded_model) else &model_storage;
+var model_block: ?*align(large_memory.ALIGNMENT) NNUEWeights = null;
+
+/// Copies `bytes`, a validated network, into the block, allocated on first use
+/// and never freed, and makes it the network in use.
+fn adopt(bytes: *const [@sizeOf(NNUEWeights)]u8) void {
+    const block = model_block orelse large_memory.create(NNUEWeights, "network") catch @panic("out of memory for the network");
+    model_block = block;
+    @memcpy(std.mem.asBytes(block), bytes);
+    MODEL = block;
+    prepare();
+}
 
 /// What the head derives from `MODEL`; `prepare` keeps it in step.
 pub var prepared: switch (HEAD) {
@@ -122,16 +134,13 @@ pub var prepared: switch (HEAD) {
     .multi => head_multi.Prepared,
 } = undefined;
 
-fn prepare() void {
-    if (HEAD == .multi) prepared = .init(&MODEL.head, l1_shift(&MODEL.header));
-}
+/// Changes whenever another network becomes the active one; what was computed
+/// with the previous network is recognised by an older value.
+pub var generation: u32 = 0;
 
-fn adviseHugePages() void {
-    if (builtin.target.os.tag != .linux) return;
-    const MADV_HUGEPAGE = 14;
-    const bytes = std.mem.asBytes(&model_storage);
-    const ptr: [*]align(2 * 1024 * 1024) u8 = @alignCast(bytes.ptr);
-    std.posix.madvise(ptr, bytes.len, MADV_HUGEPAGE) catch {};
+fn prepare() void {
+    generation +%= 1;
+    if (HEAD == .multi) prepared = .init(&MODEL.head, l1_shift(&MODEL.header));
 }
 
 pub const EMBEDDED_NAME = "<embedded>";
@@ -219,16 +228,8 @@ comptime {
 }
 
 pub fn do_nnue() void {
-    adviseHugePages();
-    // Copy straight into the global. Do NOT assign through a by-value temporary.
-    // A 25 MB MODEL on the stack may cause overflow.
-    if (!platform.is_wasm) {
-        @memcpy(std.mem.asBytes(&model_storage), NNUE_SOURCE[0..@sizeOf(NNUEWeights)]);
-    }
-    // Validate the network in use rather than NNUE_SOURCE: on wasm, referencing
-    // the embedded bytes at runtime would emit a second 25 MB copy of them.
-    validate(std.mem.asBytes(MODEL)) catch |err| std.debug.panic("Embedded network is unusable: {s}", .{@errorName(err)});
-    prepare();
+    validate(embedded_bytes) catch |err| std.debug.panic("Embedded network is unusable: {s}", .{@errorName(err)});
+    if (platform.is_wasm) prepare() else adopt(embedded_bytes);
 }
 
 /// Large enough to read a network of either architecture, so that a file of
@@ -244,22 +245,21 @@ pub fn read_file(path: []const u8) ![]u8 {
 /// Replaces the active network's weights with `bytes`, a whole network file,
 /// keeping its name. Every network enters through here, so `bytes` gets the
 /// checks of `validate`: this build's architecture, header and weight ranges.
-/// The active network is untouched on error. Callers must refresh every
-/// position's accumulators afterwards. Not for wasm, which reads the embedded
-/// network in place.
+/// The active network is untouched on error. Callers must refresh the
+/// evaluation of every position they keep (`Position.refresh_evaluation`, or
+/// setting it up again). Not for wasm, which reads the embedded network in place.
 pub fn install(bytes: []const u8) NetworkError!void {
     try validate(bytes);
-    @memcpy(std.mem.asBytes(&model_storage), bytes);
-    prepare();
+    adopt(bytes[0..@sizeOf(NNUEWeights)]);
 }
 
 /// Replaces the active network with the file at `path`, or with the embedded
 /// network for `EMBEDDED_NAME`. The active network is untouched on error.
-/// Callers must refresh every position's accumulators afterwards.
+/// Callers must refresh the evaluation of every position they keep.
 pub fn load(path: []const u8) !void {
     if (comptime !supports_eval_file) return error.Unsupported;
     if (std.mem.eql(u8, path, EMBEDDED_NAME)) {
-        try install(NNUE_SOURCE[0..@sizeOf(NNUEWeights)]);
+        try install(embedded_bytes);
         active_name = build_options.net_name;
         return;
     }

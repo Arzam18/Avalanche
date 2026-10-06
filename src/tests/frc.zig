@@ -61,26 +61,8 @@ fn perft_from(pos: *position.Position, depth: u32) usize {
     };
 }
 
-fn legal_moves(pos: *position.Position, list: *std.array_list.Managed(types.Move)) void {
-    switch (pos.turn) {
-        .White => pos.generate_legal_moves(.White, list),
-        .Black => pos.generate_legal_moves(.Black, list),
-    }
-}
-
-fn play(pos: *position.Position, move: types.Move) void {
-    switch (pos.turn) {
-        .White => pos.play_move(.White, move),
-        .Black => pos.play_move(.Black, move),
-    }
-}
-
-fn undo(pos: *position.Position, move: types.Move) void {
-    switch (pos.turn) {
-        .White => pos.undo_move(.Black, move),
-        .Black => pos.undo_move(.White, move),
-    }
-}
+const play = support.play;
+const undo = support.undo;
 
 fn expect_perft_suite(suite: []const PerftCase) !void {
     init_tables();
@@ -92,20 +74,6 @@ fn expect_perft_suite(suite: []const PerftCase) !void {
             try expectEqual(expected, perft_from(pos, @intCast(depth)));
         }
     }
-}
-
-fn expect_nnue_matches_fresh(pos: *position.Position) !void {
-    const reference = try new_position();
-    defer destroy_position(reference);
-    reference.piece_bitboards = pos.piece_bitboards;
-    reference.mailbox = pos.mailbox;
-    reference.turn = pos.turn;
-    reference.evaluator.full_refresh(reference);
-
-    const actual = pos.evaluator.nnue_evaluator.current();
-    const expected = reference.evaluator.nnue_evaluator.current();
-    try std.testing.expectEqualSlices(i16, expected.white[0..], actual.white[0..]);
-    try std.testing.expectEqualSlices(i16, expected.black[0..], actual.black[0..]);
 }
 
 fn format_move(move: types.Move, chess960: bool, buf: *[8]u8) []const u8 {
@@ -219,21 +187,18 @@ test "frc: incremental hash, fen and nnue agree with a fresh position after ever
 
     for (PERFT_SUITE ++ CASTLING_EDGE_SUITE) |case| {
         pos.set_fen(case.fen);
-        var storage: [256]types.Move = undefined;
-        var fba = std.heap.FixedBufferAllocator.init(std.mem.sliceAsBytes(&storage));
-        var moves = try std.array_list.Managed(types.Move).initCapacity(fba.allocator(), storage.len);
-        legal_moves(pos, &moves);
+        const moves = pos.legal_moves();
 
         const root_hash = pos.hash;
         const root_board = pos.mailbox;
-        for (moves.items) |move| {
+        for (moves.items()) |move| {
             play(pos, move);
             const fen = pos.basic_fen(std.testing.allocator);
             defer std.testing.allocator.free(fen);
             fresh.set_fen(fen);
             try expectEqual(fresh.hash, pos.hash);
             try expectEqual(fresh.castling_rights(), pos.castling_rights());
-            try expect_nnue_matches_fresh(pos);
+            try support.expect_nnue_matches_fresh(pos);
 
             undo(pos, move);
             try expectEqual(root_hash, pos.hash);
@@ -312,11 +277,8 @@ test "frc: search returns a legal move from a double fischer random position" {
     searcher.silent_output = true;
     _ = searcher.iterative_deepening(pos, .White, 6);
 
-    var storage: [256]types.Move = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(std.mem.sliceAsBytes(&storage));
-    var moves = try std.array_list.Managed(types.Move).initCapacity(fba.allocator(), storage.len);
-    legal_moves(pos, &moves);
-    for (moves.items) |move| {
+    const moves = pos.legal_moves();
+    for (moves.items()) |move| {
         if (move.to_u16() == searcher.best_move.to_u16()) return;
     }
     return error.TestUnexpectedResult;

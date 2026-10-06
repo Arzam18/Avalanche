@@ -102,11 +102,11 @@ test "options: EvalFile keeps the network on bad files and loads valid ones" {
     try f.init();
     defer f.deinit();
     platform.io = std.testing.io;
-    const embedded_eval = hce.evaluate_nnue(f.pos);
+    const embedded_eval = support.network_output(f.pos);
 
     try f.set("name EvalFile value /nonexistent/avalanche.nnue");
     try expect(std.mem.indexOf(u8, f.output(), "failed to load") != null);
-    try expectEqual(embedded_eval, hce.evaluate_nnue(f.pos));
+    try expectEqual(embedded_eval, support.network_output(f.pos));
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -116,7 +116,7 @@ test "options: EvalFile keeps the network on bad files and loads valid ones" {
     var args_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
     try f.set(try std.fmt.bufPrint(&args_buf, "name EvalFile value {s}", .{short_path}));
     try expect(std.mem.indexOf(u8, f.output(), if (weights.HEAD == .single) "WrongSize" else "NotANetwork") != null);
-    try expectEqual(embedded_eval, hce.evaluate_nnue(f.pos));
+    try expectEqual(embedded_eval, support.network_output(f.pos));
 
     // A valid network with shifted output biases must change the evaluation.
     const altered = try std.testing.allocator.dupe(u8, std.mem.asBytes(weights.MODEL));
@@ -132,15 +132,32 @@ test "options: EvalFile keeps the network on bad files and loads valid ones" {
             std.mem.writeInt(i32, bytes, std.mem.readInt(i32, bytes, .little) + (1 << 20), .little);
         },
     }
+    const first_feature_bias = altered[@offsetOf(weights.NNUEWeights, "layer_1_bias")..][0..2];
+    std.mem.writeInt(i16, first_feature_bias, std.mem.readInt(i16, first_feature_bias, .little) +% 7, .little);
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "altered.nnue", .data = altered });
     const altered_path = path_buf[0..try tmp.dir.realPathFile(std.testing.io, "altered.nnue", &path_buf)];
+    const kept = try support.new_position();
+    defer support.destroy_position(kept);
+    kept.set_fen(types.KIWIPETE_FEN);
+    const kept_embedded_eval = hce.evaluate_nnue(kept);
+
     try f.set(try std.fmt.bufPrint(&args_buf, "name EvalFile value {s}", .{altered_path}));
     try expect(std.mem.indexOf(u8, f.output(), "using altered.nnue") != null);
     try std.testing.expectEqualStrings("altered.nnue", weights.active_network());
     try expect(hce.evaluate_nnue(f.pos) != embedded_eval);
 
+    // A position that outlives the change, as a helper thread's does, follows the
+    // new network when its evaluation is rebuilt.
+    kept.rebuild_evaluation();
+    try expect(hce.evaluate_nnue(kept) != kept_embedded_eval);
+    const fresh = try support.new_position();
+    defer support.destroy_position(fresh);
+    fresh.set_fen(types.KIWIPETE_FEN);
+    try expectEqual(support.network_output(fresh), support.network_output(kept));
+    try expectEqual(support.network_output(fresh), hce.evaluate_nnue(kept));
+
     try f.set("name EvalFile value " ++ weights.EMBEDDED_NAME);
-    try expectEqual(embedded_eval, hce.evaluate_nnue(f.pos));
+    try expectEqual(embedded_eval, support.network_output(f.pos));
     try std.testing.expectEqualStrings(build_options.net_name, weights.active_network());
 }
 
@@ -192,7 +209,7 @@ test "options: EvalScale 1000 leaves every evaluation unchanged" {
         try f.set("name EvalScale value 700");
         try f.set("name EvalScale value 1000");
         try expectEqual(raw, hce.scale_network_output(raw));
-        try expectEqual(raw, hce.evaluate_nnue(f.pos));
+        try expectEqual(raw, support.network_output(f.pos));
         try expectEqual(before, static_eval(f.pos));
     }
 }
@@ -212,7 +229,7 @@ test "options: EvalScale 800 scales the network output to exactly raw * 800 / 10
 
         try f.set("name EvalScale value 800");
         try expectEqual(@divTrunc(raw * 800, 1000), hce.scale_network_output(raw));
-        try expectEqual(raw, hce.evaluate_nnue(f.pos));
+        try expectEqual(raw, support.network_output(f.pos));
         // The rest of the static evaluation is applied to the scaled output.
         const scaled = static_eval(f.pos);
         try expect(@abs(scaled) <= @abs(unscaled));

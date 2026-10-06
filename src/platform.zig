@@ -11,6 +11,8 @@ pub var io: std.Io = undefined;
 
 pub const allocator: std.mem.Allocator = if (is_wasm) std.heap.wasm_allocator else std.heap.c_allocator;
 
+pub const large_memory = @import("platform/large_memory.zig");
+
 const host = if (is_wasm) struct {
     extern "env" fn avalanche_write(ptr: [*]const u8, len: usize) void;
     extern "env" fn avalanche_now_ms() f64;
@@ -140,29 +142,4 @@ test "applyRmw matches @atomicRmw for every operation" {
             try std.testing.expectEqual(cell, applyRmw(i64, op, case[0], case[1]));
         }
     }
-}
-
-pub fn AtomicValue(comptime T: type) type {
-    if (has_threads) return std.atomic.Value(T);
-    return struct {
-        raw: T,
-
-        const Self = @This();
-
-        pub fn init(value: T) Self {
-            return .{ .raw = value };
-        }
-
-        pub inline fn load(self: *const Self, comptime order: std.lang.AtomicOrder) T {
-            return atomicLoad(T, &self.raw, order);
-        }
-
-        pub inline fn store(self: *Self, value: T, comptime order: std.lang.AtomicOrder) void {
-            atomicStore(T, &self.raw, value, order);
-        }
-
-        pub inline fn fetchAdd(self: *Self, operand: T, comptime order: std.lang.AtomicOrder) T {
-            return atomicRmw(T, &self.raw, .Add, operand, order);
-        }
-    };
 }
