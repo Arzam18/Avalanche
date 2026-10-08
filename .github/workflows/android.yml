@@ -21,10 +21,10 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
-      - name: Setup Zig 0.16.0
+      - name: Setup Zig (Master)
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: master
 
       - name: Build Avalanche for Android (ARM64 Musl)
         run: |
